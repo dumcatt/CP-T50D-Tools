@@ -35,7 +35,7 @@ public sealed class PrintConfirmDialog : Form
         mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 52));
         mainLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 48));
         mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
+        mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         // Left: Preview
         var previewGroup = new GroupBox
@@ -106,28 +106,33 @@ public sealed class PrintConfirmDialog : Form
         mainLayout.Controls.Add(detailsGroup, 1, 0);
 
         // Bottom Button Bar
+        // Right-aligned, same-size buttons; the row sizes itself so nothing is clipped at any DPI.
         var buttonPanel = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.RightToLeft,
-            Padding = new Padding(0, 8, 0, 0),
+            WrapContents = false,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Padding = new Padding(0),
+            Margin = new Padding(3, 8, 3, 0),
         };
 
-        var continueBtn = new Button
+        Button DialogButton(string text, DialogResult result, bool primary) => new()
         {
-            Text = "Continue",
-            DialogResult = DialogResult.OK,
-            Size = new Size(110, 36),
-            Font = new Font("Segoe UI", 10f, FontStyle.Bold),
+            Text = text,
+            DialogResult = result,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowOnly,
+            MinimumSize = new Size(110, 34),
+            Padding = new Padding(10, 0, 10, 0),
+            Font = new Font("Segoe UI", 10f, primary ? FontStyle.Bold : FontStyle.Regular),
         };
 
-        var cancelBtn = new Button
-        {
-            Text = "Cancel",
-            DialogResult = DialogResult.Cancel,
-            Size = new Size(95, 36),
-            Margin = new Padding(0, 0, 10, 0),
-        };
+        var continueBtn = DialogButton("Continue", DialogResult.OK, primary: true);
+        continueBtn.Margin = new Padding(0);
+        var cancelBtn = DialogButton("Cancel", DialogResult.Cancel, primary: false);
+        cancelBtn.Margin = new Padding(0, 0, 10, 0);
 
         buttonPanel.Controls.Add(continueBtn);
         buttonPanel.Controls.Add(cancelBtn);

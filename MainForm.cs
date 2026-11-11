@@ -193,9 +193,9 @@ public sealed class MainForm : Form
         // Card browser tab
         var cardsTab = new TabPage("Card Browser") { Padding = new Padding(2), UseVisualStyleBackColor = true };
 
-        _searchBox = new TextBox { Dock = DockStyle.Top, PlaceholderText = "Search cards or packs", BorderStyle = BorderStyle.FixedSingle };
+        _searchBox = new TextBox { Dock = DockStyle.Top, PlaceholderText = "Search cards, packs, serial numbers, illustrators or titles", BorderStyle = BorderStyle.FixedSingle };
         _searchBox.TextChanged += (_, _) => _browser.Filter = _searchBox.Text.Trim();
-        _toolTip.SetToolTip(_searchBox, "Type to filter cards and packs by name");
+        _toolTip.SetToolTip(_searchBox, "Filter by card or pack name, serial number (e.g. SV05-N003-005 or n003-005), illustrator or title");
 
         // Top bar above browser: Expand/Collapse on left, Thumbnail size slider on the RIGHT
         var toolbar = new Panel

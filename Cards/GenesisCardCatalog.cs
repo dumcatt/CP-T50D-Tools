@@ -183,13 +183,6 @@ public sealed class GenesisCardCatalog
             };
 
             _byTexture[tex] = item;
-            // Also index without "gc_XX_" prefix if present
-            int first = tex.IndexOf('_');
-            if (first >= 0)
-            {
-                int second = tex.IndexOf('_', first + 1);
-                if (second >= 0) _byTexture[tex[(second + 1)..]] = item;
-            }
         }
 
         foreach (var group in _byTexture.Values.Distinct().GroupBy(c => (c.Version, c.VolumeType, c.Volume)))
@@ -204,15 +197,8 @@ public sealed class GenesisCardCatalog
         string clean = CleanKey(rawName);
         if (_byTexture.TryGetValue(clean, out var found)) return found;
 
-        // Try matching against any texture ending with this key
-        foreach (var (k, val) in _byTexture)
-        {
-            if (clean.EndsWith(k, StringComparison.OrdinalIgnoreCase) ||
-                k.EndsWith(clean, StringComparison.OrdinalIgnoreCase))
-            {
-                return val;
-            }
-        }
+        // No partial / suffix matching: textures missing from genesis_card.xml (unused art in the
+        // game files) used to borrow another card's frame, text and serial that way.
 
         return CreateFallback(clean);
     }
@@ -252,7 +238,7 @@ public sealed class GenesisCardCatalog
         return new GenesisCardInfo
         {
             TextureName = key,
-            Title = key,
+            Title = "", // not in genesis_card.xml: left blank, editable in Card text
             Illustrator = "",
             FrameId = frameId,
             Rarity = rarity,

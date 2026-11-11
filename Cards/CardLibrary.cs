@@ -44,6 +44,19 @@ public sealed class CardItem
         return bmp;
     }
 
+    private (GenesisCardCatalog catalog, GenesisCardInfo info)? _catalogInfo;
+
+    /// <summary>This card's genesis_card.xml entry, cached until a different catalog is loaded.</summary>
+    public GenesisCardInfo CatalogInfo()
+    {
+        var catalog = GenesisCardCatalog.Instance;
+        var cached = _catalogInfo;
+        if (cached is { } c && ReferenceEquals(c.catalog, catalog)) return c.info;
+        var info = catalog.Lookup(Name);
+        _catalogInfo = (catalog, info);
+        return info;
+    }
+
     public override string ToString() => Name;
 }
 

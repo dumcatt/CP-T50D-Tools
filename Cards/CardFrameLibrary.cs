@@ -96,12 +96,4 @@ public sealed class CardFrameLibrary
         return null;
     }
 
-    public static string? CopyrightTexture(int copyrightId) => copyrightId switch
-    {
-        2 => "c_toho",
-        3 => "c_internet",
-        4 => "c_exit",
-        5 => "c_mixi",
-        _ => "c_konami_de",
-    };
 }

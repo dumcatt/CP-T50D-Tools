@@ -91,27 +91,27 @@ public static class CardCompositor
                 if (v4Layout)
                 {
                     // IV+: TITLE box top-left, ILLUST box below it, logo on the right.
-                    lines.Add((text.Title, new RectangleF(px + 10, PlaqueY + 47, 270, 26)));
-                    lines.Add((text.Illustrator, new RectangleF(px + 10, PlaqueY + 94, 270, 26)));
+                    lines.Add((text.Title, new RectangleF(px + 4, PlaqueY + 46, 276, 26)));
+                    lines.Add((text.Illustrator, new RectangleF(px + 5, PlaqueY + 94, 275, 26)));
                 }
                 else
                 {
                     // III: ILLUST bottom-left, title left-aligned under the logo.
-                    lines.Add((text.Illustrator, new RectangleF(px + 22, PlaqueY + 102, 230, 26)));
-                    lines.Add((text.Title, new RectangleF(px + 360, PlaqueY + 102, 250, 26)));
+                    lines.Add((text.Illustrator, new RectangleF(px + 10, PlaqueY + 102, 240, 26)));
+                    lines.Add((text.Title, new RectangleF(px + 348, PlaqueY + 102, 262, 26)));
                 }
             }
             else if (info.Bottom == CardBottom.IllustTag && lib.Get(info.Version, "illust_midashi") is { } tag)
             {
                 float ty = v4Layout ? TagYv4 : TagYv3;
                 if (ShowFrame) g.DrawImage(tag, TagX, ty, tag.Width, tag.Height);
-                lines.Add((text.Illustrator, new RectangleF(TagX + (v4Layout ? 11 : 22), ty + (v4Layout ? 15 : 31), 220, 26)));
+                lines.Add((text.Illustrator, new RectangleF(TagX + (v4Layout ? 12 : 11), ty + (v4Layout ? 22 : 38), 230, 26)));
             }
             else if (info.PrintsIllustratorOnArt)
             {
                 // Artwork-only cards have the ILLUST label baked in at the tag position; the name is printed under it.
                 float ty = v4Layout ? TagYv4 : TagYv3;
-                lines.Add((text.Illustrator, new RectangleF(TagX + (v4Layout ? 11 : 22), ty + (v4Layout ? 15 : 31), 220, 26)));
+                lines.Add((text.Illustrator, new RectangleF(TagX + (v4Layout ? 5 : 11), ty + (v4Layout ? 18.5f : 38), 230, 26)));
             }
 
             if (!bottomOverFrame) DrawFrame();
@@ -127,24 +127,24 @@ public static class CardCompositor
         return result;
     }
 
-    private static readonly Dictionary<Bitmap, Rectangle> _bounds = new();
+    private static readonly Dictionary<(Bitmap, int), Rectangle> _bounds = new();
 
-    /// <summary>Bounding box of the non-transparent pixels of a sprite (cached).</summary>
-    private static Rectangle VisibleBounds(Bitmap bmp)
+    /// <summary>Bounding box of a sprite's pixels with alpha above <paramref name="alpha"/> (cached).</summary>
+    private static Rectangle VisibleBounds(Bitmap bmp, int alpha)
     {
         lock (_bounds)
         {
-            if (_bounds.TryGetValue(bmp, out var r)) return r;
+            if (_bounds.TryGetValue((bmp, alpha), out var r)) return r;
             int minX = bmp.Width, minY = bmp.Height, maxX = -1, maxY = -1;
             for (int y = 0; y < bmp.Height; y++)
                 for (int x = 0; x < bmp.Width; x++)
-                    if (bmp.GetPixel(x, y).A > 24)
+                    if (bmp.GetPixel(x, y).A > alpha)
                     {
                         minX = Math.Min(minX, x); maxX = Math.Max(maxX, x);
                         minY = Math.Min(minY, y); maxY = Math.Max(maxY, y);
                     }
             r = maxX < 0 ? new Rectangle(0, 0, bmp.Width, bmp.Height) : Rectangle.FromLTRB(minX, minY, maxX + 1, maxY + 1);
-            _bounds[bmp] = r;
+            _bounds[(bmp, alpha)] = r;
             return r;
         }
     }
@@ -172,56 +172,75 @@ public static class CardCompositor
     private static void DrawSerial(Graphics g, string serial, bool v4Layout)
     {
         if (string.IsNullOrWhiteSpace(serial)) return;
-        using var font = CardFonts.Create(13.5f);
+        using var font = CardFonts.Create(12.3f);
         using var brush = new SolidBrush(Color.FromArgb(25, 25, 25));
         using var sf = new StringFormat { LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap };
-        float x = v4Layout ? 40f : 36f, cy = v4Layout ? 1011f : 1015f;
+        float x = v4Layout ? 34f : 27f, cy = v4Layout ? 1012f : 1016.5f;
         g.DrawString(serial, font, brush, new RectangleF(x, cy - 10, 260, 20), sf);
     }
 
-    /// <summary>"©" + year digits + "Konami Amusement", or the partner's complete "©Company" sprite.</summary>
+    /// <summary>Partner credits by bit of genesis_card.xml's copyright field (bit 1 is the Konami line).</summary>
+    private static readonly (int Bit, string Texture)[] PartnerCredits =
+    {
+        (32, "c_konami_de"), // Hinabitter etc. (verified against scans)
+        (16, "c_mixi"),      // Monster Strike volume
+        (8, "c_exit"),       // only 2 cards use this bit; EXIT TUNES vs INTERNET is a best guess
+        (4, "c_internet"),
+        (2, "c_toho"),       // Touhou volumes (verified against scans)
+    };
+
+    /// <summary>
+    /// Draws the copyright line. The catalog's copyright field is a bit mask: bit 1 prints
+    /// "©year Konami Amusement" (built from the c, c_suji_N and c_konami_am sprites), and each other
+    /// bit adds a partner credit to the left of it. III cards start the Konami line at x=365;
+    /// IV+ cards right-align it to x=644.5.
+    /// </summary>
     private static void DrawCopyright(Graphics g, CardFrameLibrary lib, GenesisCardInfo info, bool v4Layout)
     {
-        var parts = new List<Bitmap>();
-        var digits = new HashSet<Bitmap>();
-        if (info.CopyrightId is 2 or 3 or 4 or 5)
+        const float scale = 0.95f;
+        float cy = v4Layout ? 1026f : 1018.5f;
+        int bits = info.CopyrightId;
+
+        // Each piece: sprite, the part of it to draw, and the space before it (sprite px).
+        var main = new List<(Bitmap Bmp, Rectangle Src, float Gap)>();
+        if ((bits & 1) != 0 || bits == 0)
         {
-            if (lib.Get(info.Version, CardFrameLibrary.CopyrightTexture(info.CopyrightId)!) is { } partner) parts.Add(partner);
-        }
-        else if (info.Year >= 2016)
-        {
-            if (lib.Get(info.Version, "c") is { } c) parts.Add(c);
+            if (lib.Get(info.Version, "c") is { } c) main.Add((c, VisibleBounds(c, 24), 0));
             foreach (char d in info.Year.ToString())
-                if (lib.Get(info.Version, $"c_suji_{d}") is { } digit) { parts.Add(digit); digits.Add(digit); }
-            if (lib.Get(info.Version, "c_konami_am") is { } am) parts.Add(am);
+                if (lib.Get(info.Version, $"c_suji_{d}") is { } digit)
+                    main.Add((digit, VisibleBounds(digit, 128), main.Count == 1 ? 0.5f : 1f)); // digits: ink only, tight
+            if (lib.Get(info.Version, "c_konami_am") is { } am) main.Add((am, VisibleBounds(am, 24), 1.5f));
         }
-        else if (lib.Get(info.Version, "c_konami_de") is { } de)
-        {
-            parts.Add(de);
-        }
-        if (parts.Count == 0) return;
+        var partners = PartnerCredits
+            .Where(p => (bits & p.Bit) != 0)
+            .Select(p => lib.Get(info.Version, p.Texture))
+            .OfType<Bitmap>()
+            .Select(b => (Bmp: b, Src: VisibleBounds(b, 24), Gap: 0f))
+            .ToList();
+        if (main.Count == 0 && partners.Count == 0) return;
 
-        // Sprites are drawn trimmed to their visible pixels and packed tightly (III: 0.86 scale, IV+: 0.95).
-        float scale = v4Layout ? 0.95f : 0.86f;
-        // The c_suji digit sprites are a fixed-pitch font: each glyph's ink sits at x=2..9 of its
-        // 12px cell. Draw digits as whole cells, starting 2px left of the pen, at an 8px pitch.
-        const float digitPitch = 8f, digitInkLeft = 2f;
-        var boxes = parts.Select(p => digits.Contains(p) ? new Rectangle(0, 0, p.Width, p.Height) : VisibleBounds(p)).ToList();
-        float Cell(int i) => digits.Contains(parts[i]) ? digitPitch : boxes[i].Width;
-        float total = 0;
-        for (int i = 0; i < parts.Count; i++) total += (Cell(i) + Gap(i)) * scale;
-        float x = v4Layout ? 637f - total : 365f;
-        float cy = v4Layout ? 1025f : 1017f;
-        for (int i = 0; i < parts.Count; i++)
+        static float Width(List<(Bitmap Bmp, Rectangle Src, float Gap)> parts) => parts.Sum(p => (p.Src.Width + p.Gap) * scale);
+        void DrawRun(List<(Bitmap Bmp, Rectangle Src, float Gap)> parts, float x)
         {
-            var src = boxes[i];
-            x += Gap(i) * scale;
-            float dx = digits.Contains(parts[i]) ? -digitInkLeft * scale : 0;
-            g.DrawImage(parts[i], new RectangleF(x + dx, cy + (src.Y - parts[i].Height / 2f) * scale, src.Width * scale, src.Height * scale), src, GraphicsUnit.Pixel);
-            x += Cell(i) * scale;
+            foreach (var (bmp, src, gap) in parts)
+            {
+                x += gap * scale;
+                g.DrawImage(bmp, new RectangleF(x, cy + (src.Y - bmp.Height / 2f) * scale, src.Width * scale, src.Height * scale), src, GraphicsUnit.Pixel);
+                x += src.Width * scale;
+            }
         }
 
-        // 1px between characters, a little more before the company name.
-        float Gap(int i) => i == 0 || digits.Contains(parts[i]) ? 0 : (i == parts.Count - 1 && parts.Count > 1 ? (v4Layout ? 1 : 3) : (v4Layout ? 0 : 1));
+        float mainX = v4Layout ? 644.5f - Width(main) : 365f;
+        if (main.Count > 0) DrawRun(main, mainX);
+
+        // Partner credits go to the left of the Konami line, right to left.
+        float partnerGap = v4Layout ? 17f : 11f;
+        float right = main.Count > 0 ? mainX - partnerGap : (v4Layout ? 644.5f : 365f + partners.Sum(p => p.Src.Width * scale) + partnerGap);
+        foreach (var p in partners)
+        {
+            float w = p.Src.Width * scale;
+            DrawRun(new() { p }, right - w);
+            right -= w + partnerGap;
+        }
     }
 }

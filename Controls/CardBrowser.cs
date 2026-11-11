@@ -84,9 +84,31 @@ public sealed class CardBrowser : ScrollableControl
         RelayoutAndInvalidate();
     }
 
-    private bool Matches(CardItem c) =>
-        _filter.Length == 0 || c.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase) ||
-        c.Pack.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase);
+    /// <summary>
+    /// Matches the card file name, pack name, and the printed serial number, illustrator and title
+    /// (including the user's edits). Serial matching ignores '-', '/' and spaces, so
+    /// "SV05-N003-005", "n003-005" and "sv05n003005" all find the same card.
+    /// </summary>
+    private bool Matches(CardItem c)
+    {
+        if (_filter.Length == 0 ||
+            c.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase) ||
+            c.Pack.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var info = c.CatalogInfo();
+        if (!info.FromCatalog) return false;
+        var text = CardTextOverrides.Get(c.Name, info);
+        if (text.Illustrator.Contains(_filter, StringComparison.OrdinalIgnoreCase) ||
+            text.Title.Contains(_filter, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        string compactFilter = Compact(_filter);
+        return compactFilter.Length > 0 && Compact(text.Serial).Contains(compactFilter, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string Compact(string s) =>
+        string.Concat(s.Where(ch => ch is not ('-' or '/' or ' ' or '　' or '_')));
 
     private Size TileSize => new(_thumbSize.Width + 8, _thumbSize.Height + 8 + LabelHeight);
 
