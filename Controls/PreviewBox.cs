@@ -1,0 +1,99 @@
+using System.Drawing.Drawing2D;
+using CPT50DTools.Cards;
+
+namespace CPT50DTools.Controls;
+
+/// <summary>
+/// Gray preview surface (AssetStudio style) that renders the card image faithfully
+/// with high-quality bicubic filtering, matching thumbnail rendering, and overlays
+/// the KMAT overcoat watermark pattern when selected.
+/// </summary>
+public sealed class PreviewBox : Control
+{
+    private Image? _image;
+    private string _placeholder = "Preview\nnot\navailable";
+    private int _overcoatIndex;
+
+    public PreviewBox()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
+                 ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
+        BackColor = Color.FromArgb(160, 160, 160);
+    }
+
+    public Image? Image
+    {
+        get => _image;
+        set { _image = value; Invalidate(); }
+    }
+
+    public string Placeholder
+    {
+        get => _placeholder;
+        set { _placeholder = value; Invalidate(); }
+    }
+
+    public int OvercoatIndex
+    {
+        get => _overcoatIndex;
+        set { _overcoatIndex = value; Invalidate(); }
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(BackColor);
+
+        if (_image == null)
+        {
+            float size = Math.Clamp(Math.Min(Width, Height) / 9f, 10f, 40f);
+            using var f = new Font("Segoe UI", size, FontStyle.Bold, GraphicsUnit.Pixel);
+            using var b = new SolidBrush(Color.FromArgb(90, 90, 90));
+            using var sf = new StringFormat
+            {
+                Alignment = StringAlignment.Center,
+                LineAlignment = StringAlignment.Center,
+            };
+            g.DrawString(_placeholder, f, b, ClientRectangle, sf);
+            return;
+        }
+
+        const int margin = 8;
+        var available = Rectangle.Inflate(ClientRectangle, -margin, -margin);
+        if (available.Width <= 0 || available.Height <= 0) return;
+
+        double s = Math.Min((double)available.Width / _image.Width, (double)available.Height / _image.Height);
+        int w = Math.Max(1, (int)Math.Round(_image.Width * s));
+        int h = Math.Max(1, (int)Math.Round(_image.Height * s));
+        var dst = new Rectangle(available.X + (available.Width - w) / 2, available.Y + (available.Height - h) / 2, w, h);
+
+        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+
+        // Draw card image directly
+        g.DrawImage(_image, dst);
+
+        // Subtle 1px border around the card edge (matching thumbnail border)
+        using (var p = new Pen(Color.FromArgb(120, 120, 120)))
+        {
+            g.DrawRectangle(p, dst.X, dst.Y, dst.Width - 1, dst.Height - 1);
+        }
+
+        // Overlay KMAT watermark pattern if active
+        if (_overcoatIndex > 0)
+        {
+            bool isPortrait = _image.Height >= _image.Width;
+            OvercoatManager.Instance.RenderOvercoat(g, dst, _overcoatIndex, isPortrait);
+
+            // Small badge in top-right corner
+            string badgeText = $"★ KMAT 0{_overcoatIndex}";
+            using var badgeFont = new Font("Segoe UI", 8.5f, FontStyle.Bold);
+            var sz = g.MeasureString(badgeText, badgeFont);
+            var badgeRect = new Rectangle(dst.Right - (int)sz.Width - 10, dst.Top + 6, (int)sz.Width + 6, (int)sz.Height + 2);
+            using (var bBg = new SolidBrush(Color.FromArgb(180, 20, 20, 20)))
+                g.FillRectangle(bBg, badgeRect);
+            using (var bFg = new SolidBrush(Color.Gold))
+                g.DrawString(badgeText, badgeFont, bFg, badgeRect.X + 3, badgeRect.Y + 1);
+        }
+    }
+}
