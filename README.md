@@ -1,6 +1,11 @@
 # CP-T50D Tools
 
+
 A Windows app for browsing SOUND VOLTEX generator cards and printing them on a **Mitsubishi CP-T50D-KM** or exporting them to a PNG file.
+<p align="center">
+   <img width="800" alt="image" src="https://github.com/user-attachments/assets/dce87a8a-3409-46de-8e03-dadb014a9488" />
+</p>
+
 - Reads the game's card archives (`.ifs`) directly and builds each card with the game's own frame, plaque, text layout and per-card brightness.
 - Prints through Mitsubishi's printer library (`CPUSBXPKM.dll`), using the same image format, rotation and settings as the game.
 - Glossy or KMAT 1–6 overcoat finishes, print density, pre-heat and a vertical print offset.
@@ -17,7 +22,7 @@ A Windows app for browsing SOUND VOLTEX generator cards and printing them on a *
 |---|---|
 | **Printer** | Mitsubishi CP-T50D-KM connected by USB, with its USB driver installed (see below) |
 | **Printer library** | `CPUSBXPKM.dll` and `MUsbPuIf.dll` (64-bit), from the cabinet's `System32` folder |
-| **Game data** | A SOUND VOLTEX `contents` folder containing `data\graphics\chara_card`, `data\others\genesis_card.xml` and `ext\cpusbxpkm_data` |
+| **Game data** | A SOUND VOLTEX `contents` folder containing `data\graphics\chara_card`, `data\others\genesis_card.xml` and `ext\cpusbxpkm_data` (tested with SDVX V) |
 
 The `ext\cpusbxpkm_data` folder holds the printer's colour table, thermal compensation tables and overcoat patterns (`km1_lut.lut`, `km1_n_*.csv`, `kmat_*.raw`). **Printing does not work without it.**
 
@@ -54,7 +59,7 @@ Both folders are remembered, so next time the app loads the printer library and 
 
 ### 4. Calibrate the print position
 
-Printers cut the card slightly differently, so check yours once:
+Printers print the card slightly differently, so check yours once:
 
 1. **Options → Print test card**. It has rulers on every edge with a line every 5 px (yellow every 10 px).
 2. Count how many ruler lines are left at the **top** and **bottom** of the printed card.
