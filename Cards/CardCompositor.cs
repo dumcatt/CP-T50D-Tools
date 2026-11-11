@@ -30,10 +30,41 @@ public static class CardCompositor
         return new RectangleF(TrimRect.X * sx, TrimRect.Y * sy, TrimRect.Width * sx, TrimRect.Height * sy);
     }
 
-    // Frame and plaque are centered on the card face; frame center measured at (342, 539).
-    private const float FrameCenterX = 342f, FrameCenterY = 539f;
-    private const float PlaqueCenterX = 340f, PlaqueY = 873f;
-    private const float TagX = 24f, TagYv3 = 936f, TagYv4 = 948f;
+    /// <summary>
+    /// Placement of the frame, plaque, ILLUST tag and text boxes, taken from the game's own card layouts
+    /// (collection_frame / collection_frame2 AFP movies in data\graphics\verNN\card_data.ifs). Positions
+    /// are element centres and half-sizes on the game's 712x1072 print stage, onto which the 714x1074
+    /// artwork is drawn centred, so texture coordinates are stage coordinates + 1.
+    /// </summary>
+    private sealed record Layout(
+        PointF Frame, PointF Plaque, PointF Tag,
+        RectangleF Title, RectangleF ArtistOnPlaque, RectangleF ArtistOnTag, RectangleF Serial);
+
+    private const float StageOffset = 1f;
+
+    private static RectangleF Box(float cx, float cy, float hx, float hy) =>
+        new(cx - hx + StageOffset, cy - hy + StageOffset, hx * 2, hy * 2);
+
+    private static PointF At(float cx, float cy) => new(cx + StageOffset, cy + StageOffset);
+
+    // ver03 (III)
+    private static readonly Layout LayoutV3 = new(
+        Frame: At(339, 537), Plaque: At(340, 947), Tag: At(183, 977),
+        Title: Box(510, 987, 129, 10), ArtistOnPlaque: Box(168, 987, 129, 10), ArtistOnTag: Box(168, 987, 129, 10),
+        Serial: Box(104, 1016, 75, 7));
+
+    // ver04 / ver05 (IV+)
+    private static readonly Layout LayoutV4 = new(
+        Frame: At(340, 536), Plaque: At(340, 946), Tag: At(183, 984),
+        Title: Box(162, 932, 130, 10), ArtistOnPlaque: Box(152, 980, 120, 10), ArtistOnTag: Box(158, 983, 120, 10),
+        Serial: Box(111, 1011, 75, 7));
+
+    // The game sets the title / illustrator with [sz:16] and the serial with [sz:12], in black.
+    private const float TextSize = 16f, SerialSize = 12f;
+    private static readonly Color TextColor = Color.Black;
+
+    private static void DrawCentered(Graphics g, Bitmap bmp, PointF center) =>
+        g.DrawImage(bmp, center.X - bmp.Width / 2f, center.Y - bmp.Height / 2f, bmp.Width, bmp.Height);
 
     /// <summary>Whether the "©year Konami Amusement" line is printed (user option).</summary>
     public static bool ShowCopyright { get; set; } = true;
@@ -44,13 +75,47 @@ public static class CardCompositor
     /// <summary>Whether the illustrator, title and serial are printed (user option).</summary>
     public static bool ShowText { get; set; } = true;
 
+    /// <summary>
+    /// True when the printer's media reports the holo / overcoat flag (media type byte 2, bit 1).
+    /// The game then brightens the artwork by an extra 3% (soundvoltex.dll, 0x4c55c0).
+    /// </summary>
+    public static bool HoloMediaBoost { get; set; }
+
+    /// <summary>
+    /// Brightness the game adds to the artwork's R, G and B: (bright + 3 on holo media) / 100,
+    /// applied as a colour offset to the art layer only, not the frame or text.
+    /// </summary>
+    public static float ArtBrightness(GenesisCardInfo info) => (info.Bright + (HoloMediaBoost ? 3 : 0)) / 100f;
+
+    private static void DrawArtwork(Graphics g, Bitmap artwork, float brightness, Rectangle dest)
+    {
+        if (brightness == 0)
+        {
+            g.DrawImage(artwork, dest);
+            return;
+        }
+        // Additive offset on R, G, B (alpha untouched), like a Flash colour transform's add terms.
+        var m = new ColorMatrix { Matrix40 = brightness, Matrix41 = brightness, Matrix42 = brightness };
+        using var attrs = new ImageAttributes();
+        attrs.SetColorMatrix(m);
+        g.DrawImage(artwork, dest, 0, 0, artwork.Width, artwork.Height, GraphicsUnit.Pixel, attrs);
+    }
+
     public static Bitmap Compose(Bitmap artwork, string cardName, Bitmap? thumbnail = null)
     {
         var info = GenesisCardCatalog.Instance.Lookup(cardName);
+        float brightness = ArtBrightness(info);
         bool anyOverlay = (info.HasOverlayFrame && ShowFrame) ||
                           ((info.HasOverlayFrame || info.HasArtOnlyText) && (ShowText || ShowCopyright));
         if (!anyOverlay)
-            return (Bitmap)artwork.Clone();
+        {
+            if (brightness == 0) return (Bitmap)artwork.Clone();
+            var art = new Bitmap(artwork.Width, artwork.Height, PixelFormat.Format32bppArgb);
+            using var ga = Graphics.FromImage(art);
+            ga.Clear(Color.Black);
+            DrawArtwork(ga, artwork, brightness, new Rectangle(0, 0, artwork.Width, artwork.Height));
+            return art;
+        }
 
         var text = CardTextOverrides.Get(cardName, info);
         var lib = CardFrameLibrary.Instance;
@@ -62,18 +127,20 @@ public static class CardCompositor
         g.SmoothingMode = SmoothingMode.HighQuality;
         g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
 
-        g.Clear(Color.White);
-        g.DrawImage(artwork, 0, 0, CardWidth, CardHeight);
+        // The game clears its card render target to opaque black (D3D Clear 0xFF000000), so the
+        // transparent margins around the artwork print black, not white.
+        g.Clear(Color.Black);
+        DrawArtwork(g, artwork, brightness, new Rectangle(0, 0, CardWidth, CardHeight));
 
         bool v4Layout = info.Version >= 4;
+        var layout = v4Layout ? LayoutV4 : LayoutV3;
 
         lock (lib.SyncRoot)
         {
             var frame = info.FrameTexture != null ? lib.Get(info.Version, info.FrameTexture) : null;
             void DrawFrame()
             {
-                if (frame != null && ShowFrame)
-                    g.DrawImage(frame, FrameCenterX - frame.Width / 2f, FrameCenterY - frame.Height / 2f, frame.Width, frame.Height);
+                if (frame != null && ShowFrame) DrawCentered(g, frame, layout.Frame);
             }
 
             // Layer order measured against the game's thumbnails: the plaque / ILLUST tag sits UNDER
@@ -81,49 +148,28 @@ public static class CardCompositor
             bool bottomOverFrame = !v4Layout && info.FrameTexture == "frame_gold";
             if (bottomOverFrame) DrawFrame();
 
-            // Text is collected and drawn after all artwork layers so nothing covers it.
+            // IV+: TITLE box top-left, ILLUST box below it. III: ILLUST bottom-left, title bottom-right.
+            if (info.PlaqueTexture != null && lib.Get(info.Version, info.PlaqueTexture) is { } plaque && ShowFrame)
+                DrawCentered(g, plaque, layout.Plaque);
+            if (info.ShowsIllustTag && lib.Get(info.Version, "illust_midashi") is { } tag && ShowFrame)
+                DrawCentered(g, tag, layout.Tag);
+
+            // Text goes in the layout's own boxes, even on cards drawn without a frame (frame id 3),
+            // and is drawn after all artwork layers so nothing covers it.
             var lines = new List<(string text, RectangleF rect)>();
-            if (info.Bottom == CardBottom.Plaque && info.PlaqueTexture != null &&
-                lib.Get(info.Version, info.PlaqueTexture) is { } plaque)
-            {
-                float px = PlaqueCenterX - plaque.Width / 2f;
-                if (ShowFrame) g.DrawImage(plaque, px, PlaqueY, plaque.Width, plaque.Height);
-                if (v4Layout)
-                {
-                    // IV+: TITLE box top-left, ILLUST box below it, logo on the right.
-                    lines.Add((text.Title, new RectangleF(px + 4, PlaqueY + 46, 276, 26)));
-                    lines.Add((text.Illustrator, new RectangleF(px + 5, PlaqueY + 94, 275, 26)));
-                }
-                else
-                {
-                    // III: ILLUST bottom-left, title left-aligned under the logo.
-                    lines.Add((text.Illustrator, new RectangleF(px + 10, PlaqueY + 102, 240, 26)));
-                    lines.Add((text.Title, new RectangleF(px + 348, PlaqueY + 102, 262, 26)));
-                }
-            }
-            else if (info.Bottom == CardBottom.IllustTag && lib.Get(info.Version, "illust_midashi") is { } tag)
-            {
-                float ty = v4Layout ? TagYv4 : TagYv3;
-                if (ShowFrame) g.DrawImage(tag, TagX, ty, tag.Width, tag.Height);
-                lines.Add((text.Illustrator, new RectangleF(TagX + (v4Layout ? 12 : 11), ty + (v4Layout ? 22 : 38), 230, 26)));
-            }
-            else if (info.PrintsIllustratorOnArt)
-            {
-                // Artwork-only cards have the ILLUST label baked in at the tag position; the name is printed under it.
-                float ty = v4Layout ? TagYv4 : TagYv3;
-                lines.Add((text.Illustrator, new RectangleF(TagX + (v4Layout ? 5 : 11), ty + (v4Layout ? 18.5f : 38), 230, 26)));
-            }
+            if (info.ShowsTitle) lines.Add((text.Title, layout.Title));
+            if (info.ShowsIllustrator)
+                lines.Add((text.Illustrator, info.Bottom == CardBottom.IllustTag ? layout.ArtistOnTag : layout.ArtistOnPlaque));
 
             if (!bottomOverFrame) DrawFrame();
 
-            // IV+ cards print the title / illustrator at ~16px; III cards at ~18px.
-            float textSize = v4Layout ? 16f : 18f;
+            var textColor = info.WhiteText ? Color.White : TextColor;
             if (ShowText)
-                foreach (var (value, rect) in lines) DrawLine(g, value, rect, textSize);
+                foreach (var (value, rect) in lines) DrawLine(g, value, rect, TextSize, textColor);
             if (ShowCopyright) DrawCopyright(g, lib, info, v4Layout);
         }
 
-        if (ShowText) DrawSerial(g, text.Serial, v4Layout);
+        if (ShowText) DrawSerial(g, text.Serial, layout.Serial);
         return result;
     }
 
@@ -149,7 +195,7 @@ public static class CardCompositor
         }
     }
 
-    private static void DrawLine(Graphics g, string value, RectangleF rect, float size)
+    private static void DrawLine(Graphics g, string value, RectangleF rect, float size, Color color)
     {
         if (string.IsNullOrWhiteSpace(value)) return;
 
@@ -158,25 +204,29 @@ public static class CardCompositor
         if (width > rect.Width) size = Math.Max(9f, size * rect.Width / width);
 
         using var font = CardFonts.Create(size);
-        using var brush = new SolidBrush(Color.FromArgb(30, 30, 30));
+        using var brush = new SolidBrush(color);
         using var sf = new StringFormat
         {
             Alignment = StringAlignment.Near,
             LineAlignment = StringAlignment.Center,
             Trimming = StringTrimming.EllipsisCharacter,
-            FormatFlags = StringFormatFlags.NoWrap,
+            FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip,
         };
         g.DrawString(value, font, brush, rect, sf);
     }
 
-    private static void DrawSerial(Graphics g, string serial, bool v4Layout)
+    private static void DrawSerial(Graphics g, string serial, RectangleF box)
     {
         if (string.IsNullOrWhiteSpace(serial)) return;
-        using var font = CardFonts.Create(12.3f);
-        using var brush = new SolidBrush(Color.FromArgb(25, 25, 25));
-        using var sf = new StringFormat { LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap };
-        float x = v4Layout ? 34f : 27f, cy = v4Layout ? 1012f : 1016.5f;
-        g.DrawString(serial, font, brush, new RectangleF(x, cy - 10, 260, 20), sf);
+        using var font = CardFonts.Create(SerialSize);
+        using var brush = new SolidBrush(TextColor);
+        using var sf = new StringFormat
+        {
+            LineAlignment = StringAlignment.Center,
+            FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip,
+        };
+        // Long serials run past the 150 px box in the game too, so don't shrink or clip them.
+        g.DrawString(serial, font, brush, new RectangleF(box.X, box.Y, 260, box.Height), sf);
     }
 
     /// <summary>Partner credits by bit of genesis_card.xml's copyright field (bit 1 is the Konami line).</summary>

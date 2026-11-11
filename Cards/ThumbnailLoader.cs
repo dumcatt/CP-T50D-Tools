@@ -7,7 +7,8 @@ namespace CPT50DTools.Cards;
 public sealed class ThumbnailLoader : IDisposable
 {
     private readonly LinkedList<CardItem> _queue = new();
-    private readonly HashSet<CardItem> _queued = new();
+    private readonly Dictionary<CardItem, LinkedListNode<CardItem>> _queued = new();
+    private readonly HashSet<CardItem> _inFlight = new();
     private readonly object _lock = new();
     private readonly SemaphoreSlim _signal = new(0);
     private readonly CancellationTokenSource _cts = new();
@@ -32,15 +33,16 @@ public sealed class ThumbnailLoader : IDisposable
         lock (_lock)
         {
             if (card.Thumbnail != null || card.ThumbnailFailed) return;
-            if (_queued.Contains(card))
+            // Already being decoded: re-queuing it would leave a queue entry without a matching signal.
+            if (_inFlight.Contains(card)) return;
+            if (_queued.TryGetValue(card, out var node))
             {
                 // Move to the front: it is visible right now.
-                _queue.Remove(card);
-                _queue.AddFirst(card);
+                _queue.Remove(node);
+                _queue.AddFirst(node);
                 return;
             }
-            _queued.Add(card);
-            _queue.AddFirst(card);
+            _queued[card] = _queue.AddFirst(card);
         }
         _signal.Release();
     }
@@ -64,33 +66,40 @@ public sealed class ThumbnailLoader : IDisposable
             try { _signal.Wait(token); }
             catch (OperationCanceledException) { return; }
 
-            CardItem? card;
-            int gen;
-            lock (_lock)
+            // Drain the queue rather than taking one card per signal, so a missed signal can never
+            // leave requested cards waiting forever.
+            while (!token.IsCancellationRequested)
             {
-                if (_queue.Count == 0) continue;
-                card = _queue.First!.Value;
-                _queue.RemoveFirst();
-                gen = _generation;
-            }
-
-            Bitmap? thumb = null;
-            bool failed = false;
-            try { thumb = card.CreateThumbnail(); }
-            catch { failed = true; }
-
-            lock (_lock)
-            {
-                _queued.Remove(card);
-                if (gen != _generation)
+                CardItem card;
+                int gen;
+                lock (_lock)
                 {
-                    thumb?.Dispose();
-                    continue;
+                    if (_queue.Count == 0) break;
+                    card = _queue.First!.Value;
+                    _queue.RemoveFirst();
+                    _queued.Remove(card);
+                    _inFlight.Add(card);
+                    gen = _generation;
                 }
-                card.Thumbnail = thumb;
-                card.ThumbnailFailed = failed;
+
+                Bitmap? thumb = null;
+                bool failed = false;
+                try { thumb = card.CreateThumbnail(); }
+                catch { failed = true; }
+
+                lock (_lock)
+                {
+                    _inFlight.Remove(card);
+                    if (gen != _generation)
+                    {
+                        thumb?.Dispose();
+                        continue;
+                    }
+                    card.Thumbnail = thumb;
+                    card.ThumbnailFailed = failed;
+                }
+                ThumbnailLoaded?.Invoke(card);
             }
-            ThumbnailLoaded?.Invoke(card);
         }
     }
 

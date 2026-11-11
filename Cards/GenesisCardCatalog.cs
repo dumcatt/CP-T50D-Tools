@@ -26,63 +26,86 @@ public sealed class GenesisCardInfo
     public int TypeId { get; init; }
     public int Year { get; init; } = 2016;
     public int CopyrightId { get; init; } = 1;
+    /// <summary>genesis_card.xml "bright": percent added to the artwork's R, G and B when the game renders it.</summary>
+    public int Bright { get; init; }
 
     /// <summary>
-    /// Layout per frame id, verified against the game's own pre-rendered *_s.ifs thumbnails
-    /// (frame ids 1, 2, 3, 7, 8, 10, 11, 12, 15). Ids 5, 6, 9, 13 and 14 do not occur in the
-    /// shipped card data and use a best guess.
+    /// The game's frame table (soundvoltex.dll, built at 0x4d8244 and looked up by frame id):
+    /// which AFP layout is used, the frame texture, how the frame is chosen, and whether the
+    /// title / illustrator are printed. Mode 0 hides the frame, plaque and ILLUST tag; mode 1 uses
+    /// the texture as-is; mode 2 upgrades silver to gold for rarity 4 and up.
     /// </summary>
-    private (string? frame, string? plaque, CardBottom bottom) Layout
+    private static readonly (CardBottom layout, int texture, int mode, bool title, bool illustrator)[] FrameTable =
+    {
+        (CardBottom.Plaque, 0, 0, false, false),    // 0
+        (CardBottom.Plaque, 0, 2, true, true),      // 1
+        (CardBottom.IllustTag, 0, 2, false, true),  // 2
+        (CardBottom.Plaque, 0, 0, false, true),     // 3: no frame, illustrator only
+        (CardBottom.Plaque, 0, 0, false, false),    // 4
+        (CardBottom.Plaque, 2, 1, true, true),      // 5: lg01, white text
+        (CardBottom.Plaque, 3, 1, true, true),      // 6
+        (CardBottom.IllustTag, 3, 1, false, true),  // 7
+        (CardBottom.Plaque, 0, 1, true, true),      // 8
+        (CardBottom.IllustTag, 0, 1, false, true),  // 9
+        (CardBottom.Plaque, 1, 1, true, true),      // 10
+        (CardBottom.IllustTag, 1, 1, false, true),  // 11
+        (CardBottom.IllustTag, 4, 1, false, false), // 12: white2 (character profile)
+        (CardBottom.IllustTag, 0, 2, false, false), // 13: silver / gold frame, no tag or text
+        (CardBottom.Plaque, 4, 1, false, false),    // 14
+        (CardBottom.None, 4, 1, false, false),      // 15: art-only layout, no frame shown
+    };
+
+    // Frame textures by table index, and the plaque ("title_name") used with each; lg01, white2 and
+    // creator have none.
+    private static readonly string[] FrameTextures = { "frame_sil", "frame_gold", "frame_lg01", "frame_toho01", "frame_white2", "frame_creator" };
+    private static readonly string?[] PlaqueTextures = { "frame_sil_name", "frame_gold_name", null, "frame_toho_name", null, null };
+
+    private (CardBottom layout, int texture, int mode, bool title, bool illustrator) Entry =>
+        FrameId >= 0 && FrameId < FrameTable.Length ? FrameTable[FrameId] : FrameTable[0];
+
+    private int TextureIndex
     {
         get
         {
-            if (TextureName.Contains("_ch_") && FrameId is not (1 or 2 or 7 or 8 or 10 or 11))
-                return (null, null, CardBottom.None);
-
-            bool gold = Rarity >= 4;
-            return FrameId switch
-            {
-                1 => gold ? ("frame_gold", "frame_gold_name", CardBottom.Plaque) : ("frame_sil", "frame_sil_name", CardBottom.Plaque),
-                2 or 13 => (gold ? "frame_gold" : "frame_sil", null, CardBottom.IllustTag),
-                5 => ("frame_lg01", "frame_gold_name", CardBottom.Plaque),
-                6 => ("frame_toho01", "frame_toho_name", CardBottom.Plaque),
-                7 => ("frame_toho01", null, CardBottom.IllustTag),
-                8 => ("frame_sil", "frame_sil_name", CardBottom.Plaque),
-                9 => ("frame_sil", null, CardBottom.IllustTag),
-                10 => ("frame_gold", "frame_gold_name", CardBottom.Plaque),
-                11 => ("frame_gold", null, CardBottom.IllustTag),
-                14 => ("frame_white2", "frame_sil_name", CardBottom.Plaque),
-                // 0, 3, 4, 12, 15: the artwork already is the finished card.
-                _ => (null, null, CardBottom.None),
-            };
+            var e = Entry;
+            return e.mode == 2 && Rarity >= 4 ? Math.Min(e.texture + 1, FrameTextures.Length - 1) : e.texture;
         }
     }
 
-    /// <summary>False when the artwork is used as-is (no frame, plaque or text is drawn).</summary>
-    public bool HasOverlayFrame => Layout.frame != null;
+    /// <summary>False when no frame is drawn over the artwork.</summary>
+    public bool HasOverlayFrame => FrameTexture != null;
 
-    /// <summary>card_data.ifs texture name of the frame, or null.</summary>
-    public string? FrameTexture => Layout.frame;
+    /// <summary>
+    /// card_data.ifs texture name of the frame, or null. The art-only layout (collection_frame3, frame
+    /// id 15) has no "frame" placeholder, so the texture the table names is never shown there.
+    /// </summary>
+    public string? FrameTexture => Entry.mode == 0 || Entry.layout == CardBottom.None ? null : FrameTextures[TextureIndex];
 
-    /// <summary>card_data.ifs texture name of the bottom plaque, or null.</summary>
-    public string? PlaqueTexture => Layout.plaque;
+    /// <summary>
+    /// card_data.ifs texture name of the bottom plaque, or null. The game only shows it on the
+    /// plaque layout, with a frame, when the illustrator is printed.
+    /// </summary>
+    public string? PlaqueTexture =>
+        Entry is { layout: CardBottom.Plaque, illustrator: true, mode: not 0 } ? PlaqueTextures[TextureIndex] : null;
 
-    public CardBottom Bottom => Layout.bottom;
+    /// <summary>Which layout the card uses (plaque, ILLUST tag, or artwork only).</summary>
+    public CardBottom Bottom => Entry.layout;
+
+    /// <summary>The ILLUST tag is drawn on tag-layout cards with a frame that print the illustrator.</summary>
+    public bool ShowsIllustTag => Entry is { layout: CardBottom.IllustTag, illustrator: true, mode: not 0 };
+
+    /// <summary>Whether the game prints the title / illustrator for this frame id.</summary>
+    public bool ShowsTitle => FromCatalog && Entry.title;
+    public bool ShowsIllustrator => FromCatalog && Entry.illustrator;
+
+    /// <summary>The game prints the title / illustrator in white on the lg01 frame, black otherwise.</summary>
+    public bool WhiteText => FrameTexture == "frame_lg01";
 
     /// <summary>True for cards defined in genesis_card.xml (not fallback info for loose images).</summary>
     public bool FromCatalog => VolumeTotal > 0;
 
-    /// <summary>
-    /// Artwork-only cards (frame 0, 3, 4, 12, 15) still get the serial and copyright printed
-    /// on top; verified against the game's thumbnails and printed-card scans.
-    /// </summary>
+    /// <summary>Every catalog card gets the serial and copyright printed, framed or not.</summary>
     public bool HasArtOnlyText => !HasOverlayFrame && FromCatalog;
-
-    /// <summary>
-    /// Artwork-only cards whose art carries an ILLUST label (frame 0, 3, 4) also get the
-    /// illustrator name printed under it. Frame 12 (character profile) and 15 have it in the art.
-    /// </summary>
-    public bool PrintsIllustratorOnArt => HasArtOnlyText && FrameId is not (12 or 15);
 
     public int VolumeType { get; init; }
     public int Volume { get; init; }
@@ -164,6 +187,7 @@ public sealed class GenesisCardCatalog
             int.TryParse(infoEl.Element("type_id")?.Value, out int typeId);
             int.TryParse(infoEl.Element("year")?.Value, out int year);
             int.TryParse(infoEl.Element("copyright")?.Value, out int copyright);
+            int.TryParse(infoEl.Element("bright")?.Value, out int bright);
 
             var item = new GenesisCardInfo
             {
@@ -180,6 +204,7 @@ public sealed class GenesisCardCatalog
                 TypeId = typeId,
                 Year = year > 0 ? year : 2016,
                 CopyrightId = copyright > 0 ? copyright : 1,
+                Bright = bright,
             };
 
             _byTexture[tex] = item;

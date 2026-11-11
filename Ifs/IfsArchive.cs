@@ -73,17 +73,6 @@ public sealed class IfsArchive
         BaseOffset = baseOffset;
     }
 
-    public static bool IsIfs(string path)
-    {
-        try
-        {
-            using var fs = File.OpenRead(path);
-            Span<byte> sig = stackalloc byte[4];
-            return fs.Read(sig) == 4 && BinaryPrimitives.ReadUInt32BigEndian(sig) == IfsSignature;
-        }
-        catch { return false; }
-    }
-
     public static IfsArchive Open(string path)
     {
         var ifs = new IfsArchive(path, 0);

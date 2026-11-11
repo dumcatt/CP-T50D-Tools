@@ -1,6 +1,7 @@
-using System.Reflection;
+﻿using System.Reflection;
 using CPT50DTools.Cards;
 using CPT50DTools.Controls;
+using CPT50DTools.Printer;
 
 namespace CPT50DTools;
 
@@ -15,13 +16,6 @@ public sealed class MainForm : Form
         "Pattern 4 - Card Frame Overcoat (kmat_04)",
         "Pattern 5 - PUR Radial Burst (kmat_05)",
         "Pattern 6 - SDVX Crest, Landscape (kmat_06)",
-    };
-
-    private static readonly string[] FitModeOptions =
-    {
-        "Crop to fit (fill card)",
-        "Fit inside (letterbox)",
-        "Stretch",
     };
 
     private readonly AppSettings _settings = AppSettings.Load();
@@ -49,10 +43,14 @@ public sealed class MainForm : Form
     // Right side
     private PreviewBox _preview = null!;
     private Label _resolutionLabel = null!;
+    private FlowLayoutPanel _selectionNav = null!;
+    private Button _prevCardButton = null!;
+    private Button _nextCardButton = null!;
+    private Label _selectionCounter = null!;
     private ComboBox _overcoatCombo = null!;
     private NumericUpDown _densityUpDown = null!;
-    private ComboBox _fitCombo = null!;
     private CheckBox _preheatCheck = null!;
+    private NumericUpDown _offsetUpDown = null!;
     private CheckBox _bleedCheck = null!;
     private CheckBox _copyrightCheck = null!;
     private CheckBox _frameCheck = null!;
@@ -76,6 +74,13 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _repaintTimer = new() { Interval = 100 };
     private volatile bool _thumbsDirty;
 
+    // Printer
+    private PrinterService? _printer;
+    private PrinterStatusDialog? _statusDialog;
+    private bool _printing;
+    private bool _cancelQueue;
+    private int _queueTotal, _queuePosition;
+
     private Bitmap? _currentImage;
     private int _selectionVersion;
     private CancellationTokenSource? _loadCts;
@@ -89,8 +94,8 @@ public sealed class MainForm : Form
         ApplySettingsToControls();
 
         // Initialize managers
-        if (_settings.LutOverlayFolder != null)
-            OvercoatManager.Instance.SetDataDirectory(_settings.LutOverlayFolder);
+        if (_settings.PrinterDataFolder != null)
+            OvercoatManager.Instance.SetDataDirectory(_settings.PrinterDataFolder);
 
         _thumbs.ThumbnailLoaded += _ => _thumbsDirty = true;
         _repaintTimer.Tick += (_, _) =>
@@ -101,15 +106,17 @@ public sealed class MainForm : Form
         };
         _repaintTimer.Start();
 
-        SetPrinterState(online: false, "Printer SDK not loaded");
+        SetPrinterState(PrinterState.SdkNotLoaded, "Printer SDK not loaded");
         Log($"CP-T50D Tools {_version} started.");
         if (_settings.PrinterSdkFolder != null) Log($"Printer SDK folder: {_settings.PrinterSdkFolder}");
-        if (_settings.LutOverlayFolder != null) Log($"LUT & overlay folder: {_settings.LutOverlayFolder}");
+        if (_settings.PrinterDataFolder != null) Log($"Printer data folder: {_settings.PrinterDataFolder}");
 
-        if (startupPaths is { Length: > 0 })
+        Shown += async (_, _) =>
         {
-            Shown += async (_, _) => await LoadPathsAsync(startupPaths);
-        }
+            if (_settings.PrinterSdkFolder != null && Directory.Exists(_settings.PrinterSdkFolder))
+                StartPrinter(_settings.PrinterSdkFolder, showErrors: false);
+            if (startupPaths is { Length: > 0 }) await LoadPathsAsync(startupPaths);
+        };
     }
 
     #region UI construction
@@ -131,7 +138,6 @@ public sealed class MainForm : Form
         var file = new ToolStripMenuItem("&File");
         file.DropDownItems.Add(new ToolStripMenuItem("Load game &data folder...", null, (_, _) => LoadDataFolder(), Keys.Control | Keys.Shift | Keys.O));
         file.DropDownItems.Add(new ToolStripMenuItem("Load card f&ile...", null, (_, _) => LoadCardFile(), Keys.Control | Keys.O));
-        file.DropDownItems.Add(new ToolStripMenuItem("Load &LUT && Overlay folder...", null, (_, _) => LoadLutOverlayFolder()));
         file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add(new ToolStripMenuItem("&Clear loaded cards", null, (_, _) => ClearCards()));
         file.DropDownItems.Add(new ToolStripSeparator());
@@ -244,6 +250,10 @@ public sealed class MainForm : Form
         var browserBorder = new Panel { Dock = DockStyle.Fill, BorderStyle = BorderStyle.FixedSingle, Padding = new Padding(0) };
         _browser = new CardBrowser { Dock = DockStyle.Fill, AllowDrop = true };
         _browser.SelectedCardChanged += (_, _) => OnSelectedCardChanged();
+        _browser.SelectionChanged += (_, _) => UpdateSelectionNav();
+        _toolTip.SetToolTip(_browser,
+            "Click: select a card   Ctrl+click or tile checkbox: add / remove   Shift+click: select a range\n" +
+            "Ctrl+A: select all shown cards   Esc: back to one card   Several selected cards print as a queue.");
         _browser.ThumbnailNeeded += (_, card) => _thumbs.Request(card);
         _browser.DragEnter += (_, e) =>
         {
@@ -342,6 +352,58 @@ public sealed class MainForm : Form
             AutoEllipsis = true,
         };
 
+        // ◀ 1/N ▶ under the preview when several cards are selected; the resolution stays on the right.
+        Button NavButton(string text) => new()
+        {
+            Text = text,
+            Size = new Size(24, 22),
+            Margin = new Padding(0, 1, 2, 1),
+            Padding = new Padding(0),
+            Font = new Font("Segoe UI Symbol", 8f),
+            FlatStyle = FlatStyle.System,
+        };
+        _prevCardButton = NavButton("◀");
+        _nextCardButton = NavButton("▶");
+        _prevCardButton.Click += (_, _) => StepSelection(-1);
+        _nextCardButton.Click += (_, _) => StepSelection(+1);
+        _toolTip.SetToolTip(_prevCardButton, "Previous selected card");
+        _toolTip.SetToolTip(_nextCardButton, "Next selected card");
+        _selectionCounter = new Label { AutoSize = true, Margin = new Padding(2, 5, 4, 0), ForeColor = SystemColors.ControlText };
+        _selectionNav = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Left,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            WrapContents = false,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+            Visible = false,
+        };
+        _selectionNav.Controls.AddRange(new Control[] { _prevCardButton, _selectionCounter, _nextCardButton });
+        _bleedCheck = new CheckBox
+        {
+            Text = "Show bleed area",
+            AutoSize = true,
+            Dock = DockStyle.Left,
+            Padding = new Padding(4, 3, 0, 0),
+        };
+        _bleedCheck.CheckedChanged += (_, _) =>
+        {
+            _preview.ShowBleed = _bleedCheck.Checked;
+            SaveControlsToSettings();
+        };
+        _toolTip.SetToolTip(_bleedCheck,
+            "Show the whole 714x1074 print area instead of just the card face.\n" +
+            "The bleed (shaded) is printed past the card edge and trimmed off; the dashed line is the trim line.\n" +
+            "Useful for positioning custom card art. The printed/exported image always includes the bleed.");
+
+        // Left to right: ◀ 1/N ▶ (several cards selected), Show bleed area, then the resolution on the right.
+        // Docked controls added last sit furthest left.
+        var previewFooter = new Panel { Dock = DockStyle.Fill, Height = 24, Margin = new Padding(0) };
+        previewFooter.Controls.Add(_resolutionLabel);
+        previewFooter.Controls.Add(_bleedCheck);
+        previewFooter.Controls.Add(_selectionNav);
+
         // Print options
         _optionsSection = new CollapsibleSection("Print options") { Collapsed = _settings.PrintOptionsCollapsed };
         _optionsSection.CollapsedChanged += (_, _) => { _settings.PrintOptionsCollapsed = _optionsSection.Collapsed; _settings.Save(); };
@@ -385,15 +447,6 @@ public sealed class MainForm : Form
             "\n*Note: Density adjustment is only enabled for full glossy prints (the printer uses this\n" +
             "register to select the KMAT watermark pattern code when an overcoat pattern is active).");
 
-        _fitCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
-        _fitCombo.Items.AddRange(FitModeOptions);
-        _fitCombo.SelectedIndexChanged += (_, _) => SaveControlsToSettings();
-        _toolTip.SetToolTip(_fitCombo,
-            "Image Scaling & Fit Mode (Printable Card Area: 712x1072):\n" +
-            "• Crop to fit (fill card): Scales image to fill entire card, cleanly trimming outer registration marks.\n" +
-            "• Fit inside (letterbox): Preserves original aspect ratio without cropping, fitting inside card boundaries.\n" +
-            "• Stretch: Stretches image directly to 712x1072.");
-
         _preheatCheck = new CheckBox { Text = "Pre-heat thermal head before printing", AutoSize = true, Dock = DockStyle.Fill };
         _preheatCheck.CheckedChanged += (_, _) => SaveControlsToSettings();
         _toolTip.SetToolTip(_preheatCheck,
@@ -401,24 +454,20 @@ public sealed class MainForm : Form
             "Sends CPU9PreHeat before submitting the print job to warm the thermal head up to optimal operating temperature.\n" +
             "Recommended when printing the first card from a cold start to ensure rich, uniform color density.");
 
+        _offsetUpDown = new NumericUpDown { Minimum = -40, Maximum = 40, Dock = DockStyle.Left, Width = 70 };
+        _offsetUpDown.ValueChanged += (_, _) => SaveControlsToSettings();
+        _toolTip.SetToolTip(_offsetUpDown,
+            "Vertical print offset (pixels, about 0.08 mm each):\n" +
+            "Moves the card down (positive) or up (negative) within the bleed when printing, to match where\n" +
+            "this printer cuts the card. The game has no such setting; use the test card's edge rulers to tune it.\n" +
+            "Only affects printing, not the preview. Not changed by \"Reset to default\".");
+
         AddOptionRow(opt, "Overcoat:", _overcoatCombo);
         AddOptionRow(opt, "Density:", _densityUpDown);
-        AddOptionRow(opt, "Image fit:", _fitCombo);
+        AddOptionRow(opt, "Print offset:", _offsetUpDown);
         opt.Controls.Add(_preheatCheck);
         opt.SetColumnSpan(_preheatCheck, 2);
 
-        _bleedCheck = new CheckBox { Text = "Show bleed area in preview", AutoSize = true, Dock = DockStyle.Fill };
-        _bleedCheck.CheckedChanged += (_, _) =>
-        {
-            _preview.ShowBleed = _bleedCheck.Checked;
-            SaveControlsToSettings();
-        };
-        _toolTip.SetToolTip(_bleedCheck,
-            "Show the whole 714x1074 print area instead of just the card face.\n" +
-            "The bleed (shaded) is printed past the card edge and trimmed off; the dashed line is the trim line.\n" +
-            "Useful for positioning custom card art. The printed/exported image always includes the bleed.");
-        opt.Controls.Add(_bleedCheck);
-        opt.SetColumnSpan(_bleedCheck, 2);
 
         // Card overlay toggles: each re-renders the selected card.
         CheckBox OverlayToggle(string text, string tip)
@@ -460,10 +509,13 @@ public sealed class MainForm : Form
             Enabled = false,
         };
         _printButton.Click += (_, _) => ShowPrintConfirmation();
-        _toolTip.SetToolTip(_printButton, "Open print preview and confirmation dialog to print this card to the CP-T50D");
+        _toolTip.SetToolTip(_printButton,
+            "Open the print confirmation to print this card to the CP-T50D.\n" +
+            "With several cards selected (Ctrl/Shift+click or the tile checkboxes), prints them all as a queue.\n" +
+            "While a queue is printing, click again to stop after the current card.");
 
         layout.Controls.Add(_preview, 0, 0);
-        layout.Controls.Add(_resolutionLabel, 0, 1);
+        layout.Controls.Add(previewFooter, 0, 1);
         layout.Controls.Add(_textBox, 0, 2);
         layout.Controls.Add(_optionsSection, 0, 3);
         layout.Controls.Add(_printButton, 0, 4);
@@ -491,8 +543,8 @@ public sealed class MainForm : Form
         _applyingSettings = true;
         _overcoatCombo.SelectedIndex = Math.Clamp(_settings.Overcoat, 0, OvercoatOptions.Length - 1);
         _densityUpDown.Value = Math.Clamp(_settings.Density, -7, 30);
-        _fitCombo.SelectedIndex = Math.Clamp(_settings.FitMode, 0, FitModeOptions.Length - 1);
         _preheatCheck.Checked = _settings.Preheat;
+        _offsetUpDown.Value = Math.Clamp(_settings.PrintOffsetY, -40, 40);
         _bleedCheck.Checked = _settings.ShowBleed;
         _frameCheck.Checked = !_settings.HideFrame;
         _cardTextCheck.Checked = !_settings.HideCardText;
@@ -511,8 +563,8 @@ public sealed class MainForm : Form
         if (_applyingSettings) return;
         _settings.Overcoat = _overcoatCombo.SelectedIndex;
         _settings.Density = (int)_densityUpDown.Value;
-        _settings.FitMode = _fitCombo.SelectedIndex;
         _settings.Preheat = _preheatCheck.Checked;
+        _settings.PrintOffsetY = (int)_offsetUpDown.Value;
         _settings.ShowBleed = _bleedCheck.Checked;
         _settings.HideCopyright = !_copyrightCheck.Checked;
         _settings.HideFrame = !_frameCheck.Checked;
@@ -532,7 +584,6 @@ public sealed class MainForm : Form
         bool overlayChanged = _settings.HideFrame || _settings.HideCardText || _settings.HideCopyright;
         _settings.Overcoat = 0;
         _settings.Density = 0;
-        _settings.FitMode = 0;
         _settings.Preheat = false;
         _settings.ShowBleed = false;
         _settings.HideFrame = false;
@@ -569,12 +620,36 @@ public sealed class MainForm : Form
         if (log) Log(message);
     }
 
-    private void SetPrinterState(bool online, string text)
+    private void SetPrinterState(PrinterState state, string text)
     {
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => SetPrinterState(state, text));
+            return;
+        }
         _printerLabel.Text = text;
-        _printerDot.ForeColor = online ? Color.ForestGreen : Color.Firebrick;
-        _printerDot.ToolTipText = online ? "Printer online" : "Printer offline";
+        _printerDot.ForeColor = PrinterStateColor(state);
+        _printerDot.ToolTipText = state switch
+        {
+            PrinterState.Ready => "Printer online",
+            PrinterState.Printing => "Printing",
+            PrinterState.Cooling => "Thermal head cooling",
+            PrinterState.Searching => "Searching for printer",
+            PrinterState.Error => "Printer error",
+            PrinterState.Standby => "Standby for paper / ink change",
+            _ => "Printer offline",
+        };
     }
+
+    public static Color PrinterStateColor(PrinterState state) => state switch
+    {
+        PrinterState.Ready => Color.ForestGreen,
+        PrinterState.Searching => Color.Goldenrod,
+        PrinterState.Printing => Color.RoyalBlue,
+        PrinterState.Cooling => Color.DarkOrange,
+        PrinterState.Standby => Color.SlateGray,
+        _ => Color.Firebrick,
+    };
 
     #endregion
 
@@ -613,6 +688,10 @@ public sealed class MainForm : Form
     private void LoadCatalogFor(string path)
     {
         string? data = CardLibrary.ResolveDataFolder(path);
+        if (FindPrinterDataFolder(data ?? path) is { } printerData)
+            ApplyPrinterDataFolder(printerData);
+        else if (data != null)
+            Log($"No ext\\cpusbxpkm_data folder found for {path}; overcoat previews and printing need it.");
         if (data != null)
         {
             CardFrameLibrary.Instance.SetDataFolder(data);
@@ -733,47 +812,54 @@ public sealed class MainForm : Form
         SetStatus("Card list cleared.", log: false);
     }
 
-    private void LoadLutOverlayFolder()
+    /// <summary>
+    /// Looks for the printer's cpusbxpkm_data folder (LUTs, compensation tables and KMAT overlays)
+    /// in contents\ext, walking up from <paramref name="path"/> (game root, contents or data folder).
+    /// </summary>
+    private static string? FindPrinterDataFolder(string path)
     {
-        using var dlg = new FolderBrowserDialog
+        try
         {
-            Description = "Select the \"ext\" folder containing the LUTs and KMAT overlays",
-            UseDescriptionForTitle = true,
-            ShowNewFolderButton = false,
-        };
-        if (_settings.LutOverlayFolder != null && Directory.Exists(_settings.LutOverlayFolder))
-            dlg.InitialDirectory = _settings.LutOverlayFolder;
-        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+            var start = Directory.Exists(path) ? new DirectoryInfo(path) : new FileInfo(path).Directory;
+            for (var dir = start; dir != null; dir = dir.Parent)
+            {
+                foreach (var candidate in new[]
+                {
+                    Path.Combine(dir.FullName, "ext", "cpusbxpkm_data"),
+                    Path.Combine(dir.FullName, "contents", "ext", "cpusbxpkm_data"),
+                    Path.Combine(dir.FullName, "cpusbxpkm_data"),
+                })
+                {
+                    if (Directory.Exists(candidate) &&
+                        (Directory.EnumerateFiles(candidate, "*.lut").Any() || Directory.EnumerateFiles(candidate, "kmat_*.raw").Any()))
+                        return candidate;
+                }
+            }
+        }
+        catch (Exception) { /* unreadable path: treat as not found */ }
+        return null;
+    }
 
-        string dataDir = new[]
-        {
-            Path.Combine(dlg.SelectedPath, "cpusbxpkm_data"),
-            Path.Combine(dlg.SelectedPath, "ext", "cpusbxpkm_data"),
-            dlg.SelectedPath,
-        }.First(Directory.Exists);
+    /// <summary>Uses <paramref name="dataDir"/> for the overcoat preview and the printer SDK, and remembers it.</summary>
+    private void ApplyPrinterDataFolder(string dataDir)
+    {
+        if (string.Equals(_settings.PrinterDataFolder, dataDir, StringComparison.OrdinalIgnoreCase) &&
+            (_printer == null || _printer.Sdk.DataFolder == dataDir))
+            return;
 
         var luts = Directory.GetFiles(dataDir, "*.lut");
         var csvs = Directory.GetFiles(dataDir, "km1_n_*.csv");
         var kmats = Directory.GetFiles(dataDir, "kmat_*.raw");
-
-        Log($"LUT & overlay folder: {dataDir}");
+        Log($"Printer data folder: {dataDir}");
         Log($"  LUTs: {string.Join(", ", luts.Select(Path.GetFileName))}");
         Log($"  Compensation tables: {string.Join(", ", csvs.Select(Path.GetFileName))}");
         Log($"  KMAT overlays: {string.Join(", ", kmats.Select(Path.GetFileName))}");
 
-        if (luts.Length == 0 && kmats.Length == 0)
-        {
-            MessageBox.Show(this, $"No LUT (*.lut) or KMAT overlay (kmat_*.raw) files were found in:\n{dataDir}",
-                "LUT & Overlay folder", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            SetStatus("No LUT / overlay files found.", log: false);
-            return;
-        }
-
-        _settings.LutOverlayFolder = dataDir;
+        _settings.PrinterDataFolder = dataDir;
         _settings.Save();
         OvercoatManager.Instance.SetDataDirectory(dataDir);
+        if (_printer != null) _printer.Sdk.DataFolder = dataDir;
         _preview.Invalidate();
-        SetStatus($"Loaded LUT & overlay folder ({luts.Length} LUT, {kmats.Length} overlay(s)).");
     }
 
     #endregion
@@ -804,8 +890,83 @@ public sealed class MainForm : Form
 
         _settings.PrinterSdkFolder = dlg.SelectedPath;
         _settings.Save();
-        SetPrinterState(online: false, "SDK loaded - printer not connected");
-        SetStatus($"Printer SDK folder set: {dlg.SelectedPath}");
+        StartPrinter(dlg.SelectedPath, showErrors: true);
+    }
+
+    /// <summary>Loads CPUSBXPKM.dll from <paramref name="folder"/> and starts the status poll.</summary>
+    private bool StartPrinter(string folder, bool showErrors)
+    {
+        if (_printer != null && string.Equals(Path.GetFullPath(_printer.Sdk.Folder), Path.GetFullPath(folder), StringComparison.OrdinalIgnoreCase))
+        {
+            SetStatus($"Printer SDK already loaded from {folder}");
+            return true;
+        }
+
+        try
+        {
+            string? dataFolder = ResolvePrinterDataFolder(folder);
+            if (dataFolder != null && dataFolder.Any(c => c > 127))
+                Log("Warning: the printer data folder path contains non-ASCII characters; the printer SDK may not find its data files.");
+
+            var sdk = PrinterNative.Load(folder, dataFolder, Log);
+            if (!sdk.DataFolderHooked)
+                Log($"Printer SDK loaded from {folder}; data folder from CPUSBXPKM.ini.");
+            else if (sdk.DataFolder != null)
+                Log($"Printer SDK loaded from {folder}; data folder: {sdk.DataFolder}");
+            else
+                Log($"Printer SDK loaded from {folder}, but no cpusbxpkm_data folder was found. " +
+                    "Printing will fail until the game folder is loaded with File > Load game data folder.");
+
+            _printer = new PrinterService(sdk, Log);
+            _printer.StatusChanged += s =>
+            {
+                SetPrinterState(s.State, s.StatusText);
+                UpdateHoloMediaBoost(s);
+            };
+            SetPrinterState(PrinterState.Searching, "Searching for printer...");
+            SetStatus($"Printer SDK loaded: {folder}", log: false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to load the printer SDK from {folder}: {ex.Message}");
+            SetPrinterState(PrinterState.SdkNotLoaded, "Printer SDK failed to load");
+            if (showErrors)
+                MessageBox.Show(this, $"Could not load the printer SDK:\n\n{ex.Message}", "Printer SDK",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Mirrors the game: media type replies tagged 'H' (byte 3) are kept, and bit 1 of byte 2 makes
+    /// the card artwork 3% brighter. Re-renders the preview when that changes.
+    /// </summary>
+    private void UpdateHoloMediaBoost(PrinterSnapshot s)
+    {
+        if (s.RawMedia is not { Length: >= 4 } media || media[3] != 0x48) return;
+        bool boost = (media[2] & 0x02) != 0;
+        if (boost == CardCompositor.HoloMediaBoost) return;
+        CardCompositor.HoloMediaBoost = boost;
+        Log(boost ? "Printer media is holo / overcoat: card artwork is printed 3% brighter, as in the game."
+                  : "Printer media is not holo: no extra artwork brightness.");
+        BeginInvoke(() => _ = RenderSelectedAsync(keepCurrent: true));
+    }
+
+    /// <summary>
+    /// The folder with KM1_LUT.lut / KM1_N_*.csv / KMAT_*.raw that CPUSBXPKM.dll needs to print:
+    /// the one found with the game data folder, else one near the SDK.
+    /// </summary>
+    private string? ResolvePrinterDataFolder(string sdkFolder)
+    {
+        if (_settings.PrinterDataFolder != null && Directory.Exists(_settings.PrinterDataFolder))
+            return _settings.PrinterDataFolder;
+
+        string? found = (_settings.LastCardFolder != null ? FindPrinterDataFolder(_settings.LastCardFolder) : null)
+                        ?? FindPrinterDataFolder(sdkFolder)
+                        ?? FindPrinterDataFolder(Path.Combine(sdkFolder, "..", "KFC"));
+        if (found != null) ApplyPrinterDataFolder(Path.GetFullPath(found));
+        return found == null ? null : Path.GetFullPath(found);
     }
 
     private void PrintTestCard()
@@ -814,61 +975,191 @@ public sealed class MainForm : Form
         if (!File.Exists(testCardPath) && _settings.LastCardFolder != null)
             testCardPath = Path.Combine(_settings.LastCardFolder, "gc_test_s.png");
 
+        CardItem testItem;
         if (File.Exists(testCardPath))
         {
-            var testItem = CardLibrary.FromImageFile(testCardPath);
-            testItem.Pack = new CardPack { Name = "Test Card Pack" };
-            using var bmp = testItem.LoadFull();
-            ShowConfirmationAndPrint(testItem, bmp);
+            testItem = CardLibrary.FromImageFile(testCardPath);
         }
         else
         {
-            NotImplementedYet("Print test card");
+            testItem = new CardItem
+            {
+                Name = "Calibration test card",
+                Source = "Generated",
+                LoadFull = PrintJobBuilder.CreateTestCard,
+            };
         }
+        new CardPack { Name = "Test Card Pack" }.Add(testItem);
+        using var bmp = testItem.LoadFull();
+        _ = ShowConfirmationAndPrint(testItem, bmp);
     }
 
-    private void ShowPrinterStatus() => NotImplementedYet("Printer status");
+    private void ShowPrinterStatus()
+    {
+        if (_printer == null)
+        {
+            if (MessageBox.Show(this, "The printer SDK is not loaded.\n\nSelect the folder containing CPUSBXPKM.dll and MUsbPuIf.dll now?",
+                    "Printer status", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                LoadPrinterSdkFolder();
+            if (_printer == null) return;
+        }
+
+        if (_statusDialog is { IsDisposed: false })
+        {
+            _statusDialog.Activate();
+            return;
+        }
+        _statusDialog = new PrinterStatusDialog(_printer);
+        _statusDialog.FormClosed += (_, _) => _statusDialog = null;
+        _statusDialog.Show(this);
+        _ = Task.Run(_printer.Refresh);
+    }
 
     private void ShowPrintConfirmation()
     {
+        // While a queue runs, the print button cancels it after the current card.
+        if (_printing)
+        {
+            if (_queueTotal > 1 && !_cancelQueue)
+            {
+                _cancelQueue = true;
+                Log("Print queue: cancel requested; stopping after the current card.");
+                UpdatePrintButton();
+            }
+            return;
+        }
         var card = _browser.SelectedCard;
         if (card == null || _currentImage == null) return;
-        ShowConfirmationAndPrint(card, _currentImage);
+        var cards = _browser.SelectedCards;
+        _ = ConfirmAndPrintAsync(cards.Count > 1 ? cards : new[] { card }, card, _currentImage);
     }
 
-    private void ShowConfirmationAndPrint(CardItem card, Image image)
-    {
-        using var dlg = new PrintConfirmDialog(
-            card: card,
-            cardImage: image,
-            overcoatIndex: _overcoatCombo.SelectedIndex,
-            overcoatName: OvercoatOptions[_overcoatCombo.SelectedIndex],
-            density: (int)_densityUpDown.Value,
-            fitMode: _fitCombo.SelectedIndex,
-            preheat: _preheatCheck.Checked,
-            printerStatus: _printerLabel.Text ?? "Printer offline");
+    private Task ShowConfirmationAndPrint(CardItem card, Image image) => ConfirmAndPrintAsync(new[] { card }, card, image);
 
-        if (dlg.ShowDialog(this) == DialogResult.OK)
+    /// <summary>
+    /// Shows the confirmation dialog and prints <paramref name="cards"/> one after another (a print queue
+    /// when there are several). <paramref name="shownImage"/> is the already-rendered image of
+    /// <paramref name="shown"/>; it is only used before the first await, so the caller may dispose it as
+    /// soon as this returns. The other cards are rendered when their turn comes.
+    /// </summary>
+    private async Task ConfirmAndPrintAsync(IReadOnlyList<CardItem> cards, CardItem shown, Image shownImage)
+    {
+        if (_printing)
         {
-            Log($"Print confirmed for {card.Name} (Overcoat: {OvercoatOptions[_overcoatCombo.SelectedIndex]}, Density: {_densityUpDown.Value}).");
+            MessageBox.Show(this, "A card is already printing.", "Print", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (_printer == null)
+        {
+            if (MessageBox.Show(this, "The printer SDK is not loaded.\n\nSelect the folder containing CPUSBXPKM.dll and MUsbPuIf.dll now?",
+                    "Print", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                LoadPrinterSdkFolder();
+            if (_printer == null) return;
+        }
+
+        var settings = new PrintJobSettings(
+            OvercoatIndex: _overcoatCombo.SelectedIndex,
+            Density: (int)_densityUpDown.Value,
+            Preheat: _preheatCheck.Checked,
+            OffsetY: (int)_offsetUpDown.Value);
+
+        int total = cards.Count;
+        using (var dlg = new PrintConfirmDialog(
+            card: shown,
+            cardImage: shownImage,
+            overcoatIndex: settings.OvercoatIndex,
+            overcoatName: OvercoatOptions[settings.OvercoatIndex],
+            density: settings.Density,
+            preheat: settings.Preheat,
+            printerStatus: _printerLabel.Text ?? "Printer offline",
+            queue: cards))
+        {
+            if (dlg.ShowDialog(this) != DialogResult.OK)
+            {
+                Log("Print job cancelled by user.");
+                SetStatus("Print cancelled.", log: false);
+                return;
+            }
+        }
+
+        // The shown card's image may be disposed after the first await, so prepare it now.
+        Bitmap? shownPrint;
+        try
+        {
+            shownPrint = PrintJobBuilder.ToPrintBitmap(shownImage, settings.OffsetY);
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Could not prepare {shown.Name} for printing: {ex.Message}");
+            return;
+        }
+
+        Log($"{(total > 1 ? $"Print queue of {total} cards" : $"Printing {shown.Name}")} " +
+            $"(Overcoat: {OvercoatOptions[settings.OvercoatIndex]}, " +
+            $"Density: {(settings.OvercoatIndex == 0 ? settings.Density.ToString("+#;-#;0") : "locked")}, " +
+            $"Offset: {settings.OffsetY:+#;-#;0} px, Pre-heat: {(settings.Preheat ? "on" : "off")}).");
+        _printing = true;
+        _cancelQueue = false;
+        _queueTotal = total;
+        _queuePosition = 0;
+        UpdatePrintButton();
+
+        int printed = 0;
+        CardItem? current = null;
+        try
+        {
+            for (int i = 0; i < total; i++)
+            {
+                if (_cancelQueue) break;
+                current = cards[i];
+                _queuePosition = i + 1;
+                UpdatePrintButton();
+                string prefix = total > 1 ? $"Card {i + 1}/{total} ({current.Name}): " : "";
+
+                Bitmap printBitmap;
+                if (current == shown && shownPrint != null)
+                {
+                    printBitmap = shownPrint;
+                    shownPrint = null;
+                }
+                else
+                {
+                    SetStatus(prefix + "preparing...", log: false);
+                    using var full = await Task.Run(current.LoadFull);
+                    printBitmap = PrintJobBuilder.ToPrintBitmap(full, settings.OffsetY);
+                }
+
+                using (printBitmap)
+                {
+                    if (total > 1) Log($"Print queue {i + 1}/{total}: {current.Name}");
+                    var progress = new Progress<string>(m => SetStatus(prefix + m, log: false));
+                    await _printer.PrintAsync(printBitmap, settings, progress);
+                }
+                printed++;
+            }
+
+            if (_cancelQueue && printed < total)
+                SetStatus($"Print queue cancelled: printed {printed} of {total} cards.");
+            else
+                SetStatus(total > 1 ? $"Printed all {total} cards." : $"Printed {shown.Name}.");
+        }
+        catch (Exception ex)
+        {
+            string where = total > 1 ? $"Printed {printed} of {total} cards; stopped at {current?.Name}.\n\n" : "";
+            SetStatus($"Print failed{(current != null && total > 1 ? $" on {current.Name}" : "")}: {ex.Message}");
+            bool media = ex is PrinterException { StatusCode: PrinterStatusCodes.MediaEmpty };
             MessageBox.Show(this,
-                $"Print job for '{card.Name}' confirmed.\n\n" +
-                $"Finish: {OvercoatOptions[_overcoatCombo.SelectedIndex]}\n\n" +
-                "Printer hardware transmission functions will be implemented in the next step.",
-                "Print Job Submitted", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                where + (media ? $"{ex.Message}\n\nReplace the ribbon / card stock and try again." : ex.Message),
+                "Print failed", MessageBoxButtons.OK, media ? MessageBoxIcon.Warning : MessageBoxIcon.Error);
         }
-        else
+        finally
         {
-            Log("Print job cancelled by user.");
-            SetStatus("Print cancelled.", log: false);
+            shownPrint?.Dispose();
+            _printing = false;
+            _cancelQueue = false;
+            _queueTotal = 0;
+            UpdatePrintButton();
         }
-    }
-
-    private void NotImplementedYet(string feature)
-    {
-        Log($"{feature}: printer functions are not implemented yet.");
-        MessageBox.Show(this, $"{feature} is not implemented yet.\nPrinter functions will be added in the next step.",
-            "Not implemented", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     private void ExportSelectedPng()
@@ -910,7 +1201,64 @@ public sealed class MainForm : Form
         var card = _browser.SelectedCard;
         _textTimer.Stop();
         LoadCardText(card);
+        UpdateSelectionNav();
         _ = RenderSelectedAsync(keepCurrent: false);
+    }
+
+    /// <summary>Shows ◀ 1/N ▶ under the preview while several cards are selected.</summary>
+    private void UpdateSelectionNav()
+    {
+        var selection = _browser.SelectedCards;
+        bool multi = selection.Count > 1;
+        _selectionNav.Visible = multi;
+        if (multi)
+        {
+            int i = _browser.SelectedCard is { } c ? IndexOf(selection, c) : -1;
+            _selectionCounter.Text = $"{i + 1}/{selection.Count}";
+        }
+        UpdatePrintButton();
+    }
+
+    private static int IndexOf(IReadOnlyList<CardItem> list, CardItem card)
+    {
+        for (int i = 0; i < list.Count; i++)
+            if (list[i] == card) return i;
+        return -1;
+    }
+
+    /// <summary>Previews the previous / next selected card (wrapping around).</summary>
+    private void StepSelection(int delta)
+    {
+        var selection = _browser.SelectedCards;
+        if (selection.Count < 2) return;
+        int i = _browser.SelectedCard is { } c ? IndexOf(selection, c) : -1;
+        int next = ((i < 0 ? 0 : i + delta) % selection.Count + selection.Count) % selection.Count;
+        _browser.FocusCard(selection[next]);
+    }
+
+    /// <summary>
+    /// "Print Card" / "Print N Cards"; while a queue is printing it becomes "Cancel Queue (i/N)" and stops
+    /// the queue after the current card.
+    /// </summary>
+    private void UpdatePrintButton()
+    {
+        if (_printing)
+        {
+            if (_queueTotal > 1)
+            {
+                _printButton.Text = _cancelQueue ? "Stopping after this card..." : $"Cancel Queue ({_queuePosition}/{_queueTotal})";
+                _printButton.Enabled = !_cancelQueue;
+            }
+            else
+            {
+                _printButton.Text = "Printing...";
+                _printButton.Enabled = false;
+            }
+            return;
+        }
+        int count = _browser.SelectedCards.Count;
+        _printButton.Text = count > 1 ? $"Print {count} Cards" : "Print Card";
+        _printButton.Enabled = _currentImage != null;
     }
 
     /// <summary>Renders the selected card into the preview. keepCurrent keeps the old image visible while re-rendering.</summary>
@@ -925,7 +1273,7 @@ public sealed class MainForm : Form
             _currentImage?.Dispose();
             _currentImage = null;
             _miExportPng.Enabled = false;
-            _printButton.Enabled = false;
+            UpdatePrintButton();
         }
 
         if (card == null)
@@ -955,7 +1303,7 @@ public sealed class MainForm : Form
             old?.Dispose();
             _resolutionLabel.Text = $"{bmp.Width} x {bmp.Height} px";
             _miExportPng.Enabled = true;
-            _printButton.Enabled = true;
+            UpdatePrintButton();
             if (!keepCurrent) SetStatus($"{card.Name}  ({card.Source})", log: false);
         }
         catch (Exception ex)
@@ -974,16 +1322,18 @@ public sealed class MainForm : Form
         try
         {
             var info = card != null ? GenesisCardCatalog.Instance.Lookup(card.Name) : null;
-            bool editable = info is { HasOverlayFrame: true };
+            // Every catalog card gets its serial printed; the title / illustrator only where the game prints them.
+            bool editable = info is { FromCatalog: true };
             _textBox.Body.Enabled = editable;
             _toolTip.SetToolTip(_textBox.Body, editable || card == null ? "" :
-                "This card's artwork already includes its frame and text, so nothing is drawn over it.");
+                "This image is not in genesis_card.xml, so no card text is printed on it.");
 
             var text = editable ? CardTextOverrides.Get(card!.Name) : default;
             _illustratorText.Text = text.Illustrator ?? "";
             _titleText.Text = text.Title ?? "";
             _serialText.Text = text.Serial ?? "";
-            _titleText.Enabled = info?.Bottom == CardBottom.Plaque;
+            _titleText.Enabled = info?.ShowsTitle == true;
+            _illustratorText.Enabled = info?.ShowsIllustrator == true;
             _resetTextButton.Enabled = editable && CardTextOverrides.HasOverride(card!.Name);
         }
         finally
@@ -1019,6 +1369,7 @@ public sealed class MainForm : Form
         _textTimer.Stop();
         _loadCts?.Cancel();
         _thumbs.Dispose();
+        _printer?.Dispose();
         _currentImage?.Dispose();
         base.OnFormClosed(e);
     }

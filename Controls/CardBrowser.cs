@@ -1,4 +1,5 @@
 using System.Drawing.Drawing2D;
+using System.Windows.Forms.VisualStyles;
 using CPT50DTools.Cards;
 
 namespace CPT50DTools.Controls;
@@ -17,12 +18,21 @@ public sealed class CardBrowser : ScrollableControl
     private readonly List<CardPack> _packs = new();
     private readonly List<(Rectangle Rect, CardPack Pack)> _headerRects = new();
     private readonly List<(Rectangle Rect, CardItem Card)> _tileRects = new();
+    private const int CheckSize = 16;
+
     private CardItem? _selected;
+    // Every selected card; always contains _selected when that is set.
+    private readonly HashSet<CardItem> _selection = new();
+    // Where Shift+click / Shift+arrow ranges start.
+    private CardItem? _anchor;
     private CardItem? _hover;
     private string _filter = "";
     private Size _thumbSize = new(110, 166);
 
+    /// <summary>The focused card (the one shown in the preview) changed.</summary>
     public event EventHandler? SelectedCardChanged;
+    /// <summary>The set of selected cards changed.</summary>
+    public event EventHandler? SelectionChanged;
     public event EventHandler<CardItem>? ThumbnailNeeded;
 
     public CardBrowser()
@@ -34,18 +44,92 @@ public sealed class CardBrowser : ScrollableControl
         TabStop = true;
     }
 
-    public IReadOnlyList<CardPack> Packs => _packs;
-
+    /// <summary>The focused card. Setting it selects only that card.</summary>
     public CardItem? SelectedCard
     {
         get => _selected;
         set
         {
-            if (_selected == value) return;
-            _selected = value;
-            Invalidate();
-            SelectedCardChanged?.Invoke(this, EventArgs.Empty);
+            _anchor = value;
+            SetSelection(value == null ? Array.Empty<CardItem>() : new[] { value }, value);
         }
+    }
+
+    /// <summary>All selected cards, in browser order (pack order, then card order).</summary>
+    public IReadOnlyList<CardItem> SelectedCards =>
+        _selection.Count == 0 ? Array.Empty<CardItem>() : _packs.SelectMany(p => p.Cards).Where(_selection.Contains).ToList();
+
+    /// <summary>Shows another card of the current selection in the preview without changing the selection.</summary>
+    public void FocusCard(CardItem card)
+    {
+        if (!_selection.Contains(card)) return;
+        SetFocused(card);
+        int i = _tileRects.FindIndex(t => t.Card == card);
+        if (i >= 0) EnsureVisible(_tileRects[i].Rect);
+    }
+
+    private void SetFocused(CardItem? card)
+    {
+        if (_selected == card) return;
+        _selected = card;
+        Invalidate();
+        SelectedCardChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void SetSelection(IEnumerable<CardItem> cards, CardItem? focus)
+    {
+        var next = new HashSet<CardItem>(cards);
+        if (focus != null) next.Add(focus);
+        bool changed = !next.SetEquals(_selection);
+        if (changed)
+        {
+            _selection.Clear();
+            _selection.UnionWith(next);
+        }
+        Invalidate();
+        SetFocused(focus);
+        if (changed) SelectionChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Ctrl+click / checkbox: adds or removes one card, keeping the rest of the selection.</summary>
+    private void ToggleCard(CardItem card)
+    {
+        _anchor = card;
+        if (!_selection.Contains(card))
+        {
+            SetSelection(_selection.Append(card), card);
+            return;
+        }
+        var rest = _selection.Where(c => c != card).ToList();
+        // Keep showing the focused card if it is still selected; otherwise the nearest one in browser order.
+        var focus = _selected != card && _selected != null ? _selected
+            : SelectedCards.Where(c => c != card).OrderBy(c => Math.Abs(DisplayIndex(c) - DisplayIndex(card))).FirstOrDefault();
+        SetSelection(rest, focus);
+    }
+
+    /// <summary>Shift+click / Shift+arrow: selects the visible cards from the anchor to <paramref name="card"/>.</summary>
+    private void SelectRange(CardItem card, bool addToSelection)
+    {
+        int a = _anchor == null ? -1 : _tileRects.FindIndex(t => t.Card == _anchor);
+        int b = _tileRects.FindIndex(t => t.Card == card);
+        if (a < 0 || b < 0)
+        {
+            SelectedCard = card;
+            return;
+        }
+        var range = _tileRects.Skip(Math.Min(a, b)).Take(Math.Abs(a - b) + 1).Select(t => t.Card);
+        SetSelection(addToSelection ? _selection.Concat(range) : range, card);
+    }
+
+    private int DisplayIndex(CardItem card)
+    {
+        int i = 0;
+        foreach (var c in _packs.SelectMany(p => p.Cards))
+        {
+            if (c == card) return i;
+            i++;
+        }
+        return int.MaxValue;
     }
 
     public Size ThumbSize
@@ -73,9 +157,12 @@ public sealed class CardBrowser : ScrollableControl
         foreach (var c in _packs.SelectMany(p => p.Cards)) c.Thumbnail?.Dispose();
         _packs.Clear();
         _selected = null;
+        _selection.Clear();
+        _anchor = null;
         _hover = null;
         RelayoutAndInvalidate();
         SelectedCardChanged?.Invoke(this, EventArgs.Empty);
+        SelectionChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public void SetAllCollapsed(bool collapsed)
@@ -207,15 +294,17 @@ public sealed class CardBrowser : ScrollableControl
 
     private void DrawTile(Graphics g, Rectangle r, CardItem card)
     {
-        bool selected = card == _selected;
+        bool selected = _selection.Contains(card);
+        bool focused = card == _selected;
         bool hover = card == _hover;
 
         if (selected)
         {
             using var b = new SolidBrush(Color.FromArgb(204, 232, 255));
             g.FillRectangle(b, r);
-            using var p = new Pen(Color.FromArgb(153, 209, 255));
-            g.DrawRectangle(p, r.X, r.Y, r.Width - 1, r.Height - 1);
+            // The focused card (shown in the preview) gets a stronger outline when several are selected.
+            using var p = new Pen(focused && _selection.Count > 1 ? Color.FromArgb(0, 120, 215) : Color.FromArgb(153, 209, 255), focused && _selection.Count > 1 ? 2f : 1f);
+            g.DrawRectangle(p, r.X + (p.Width > 1 ? 1 : 0), r.Y + (p.Width > 1 ? 1 : 0), r.Width - 1 - (p.Width > 1 ? 1 : 0), r.Height - 1 - (p.Width > 1 ? 1 : 0));
         }
         else if (hover)
         {
@@ -263,7 +352,19 @@ public sealed class CardBrowser : ScrollableControl
         {
             g.DrawString(card.Name, Font, labelBrush, labelRect, sfCenter);
         }
+
+        // Checkbox for adding the card to a multi-selection: shown on hover, and on every card once
+        // more than one is selected.
+        if (hover || (selected && _selection.Count > 1))
+        {
+            var box = CheckRect(r);
+            using (var bg = new SolidBrush(Color.FromArgb(220, Color.White))) g.FillRectangle(bg, Rectangle.Inflate(box, 2, 2));
+            CheckBoxRenderer.DrawCheckBox(g, box.Location, selected ? CheckBoxState.CheckedNormal : CheckBoxState.UncheckedNormal);
+        }
     }
+
+    /// <summary>Checkbox in the top-left corner of a tile (same coordinate space as <paramref name="tile"/>).</summary>
+    private static Rectangle CheckRect(Rectangle tile) => new(tile.X + 7, tile.Y + 7, CheckSize - 3, CheckSize - 3);
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
@@ -283,11 +384,15 @@ public sealed class CardBrowser : ScrollableControl
         }
         foreach (var (rect, card) in _tileRects)
         {
-            if (rect.Contains(p))
-            {
+            if (!rect.Contains(p)) continue;
+            var mods = ModifierKeys;
+            if ((mods & Keys.Shift) != 0)
+                SelectRange(card, addToSelection: (mods & Keys.Control) != 0);
+            else if ((mods & Keys.Control) != 0 || Rectangle.Inflate(CheckRect(rect), 3, 3).Contains(p))
+                ToggleCard(card);
+            else
                 SelectedCard = card;
-                return;
-            }
+            return;
         }
     }
 
@@ -344,6 +449,19 @@ public sealed class CardBrowser : ScrollableControl
     {
         base.OnKeyDown(e);
         if (_tileRects.Count == 0) return;
+        if (e.KeyCode == Keys.A && e.Control)
+        {
+            // Select every visible (filtered, expanded) card.
+            SetSelection(_tileRects.Select(t => t.Card), _selected != null && _tileRects.Any(t => t.Card == _selected) ? _selected : _tileRects[0].Card);
+            e.Handled = true;
+            return;
+        }
+        if (e.KeyCode == Keys.Escape && _selection.Count > 1)
+        {
+            SelectedCard = _selected;
+            e.Handled = true;
+            return;
+        }
         int idx = _selected == null ? -1 : _tileRects.FindIndex(t => t.Card == _selected);
         int cols = Math.Max(1, (Math.Max(ClientSize.Width, TileSize.Width + Pad * 2) - Pad) / (TileSize.Width + Pad));
         int next = e.KeyCode switch
@@ -356,7 +474,8 @@ public sealed class CardBrowser : ScrollableControl
         };
         if (next == int.MinValue) return;
         next = Math.Clamp(next, 0, _tileRects.Count - 1);
-        SelectedCard = _tileRects[next].Card;
+        if (e.Shift) SelectRange(_tileRects[next].Card, addToSelection: false);
+        else SelectedCard = _tileRects[next].Card;
         EnsureVisible(_tileRects[next].Rect);
         e.Handled = true;
     }

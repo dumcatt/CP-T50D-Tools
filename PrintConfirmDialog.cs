@@ -5,17 +5,35 @@ namespace CPT50DTools;
 
 public sealed class PrintConfirmDialog : Form
 {
+    // Print queue browsing: the caller's image for the card it passed in, and images this dialog
+    // rendered itself for the other queued cards (disposed with the dialog).
+    private readonly IReadOnlyList<CardItem> _queue;
+    private readonly CardItem _initialCard;
+    private readonly Image _initialImage;
+    private readonly Dictionary<CardItem, Bitmap> _rendered = new();
+    private readonly PreviewBox _preview;
+    private Label _cardValue = null!, _sourceValue = null!, _resolutionValue = null!;
+    private readonly Label? _counter;
+    private int _index;
+    private int _loadVersion;
+
     public PrintConfirmDialog(
         CardItem card,
         Image cardImage,
         int overcoatIndex,
         string overcoatName,
         int density,
-        int fitMode,
         bool preheat,
-        string printerStatus)
+        string printerStatus,
+        IReadOnlyList<CardItem>? queue = null)
     {
-        Text = "Confirm Print - Mitsubishi CP-T50D";
+        _queue = queue is { Count: > 1 } ? queue : new[] { card };
+        _initialCard = card;
+        _initialImage = cardImage;
+        _index = Math.Max(0, IndexOf(card));
+        int queueCount = _queue.Count;
+        bool isQueue = queueCount > 1;
+        Text = isQueue ? "Confirm Print Queue - Mitsubishi CP-T50D" : "Confirm Print - Mitsubishi CP-T50D";
         Font = new Font("Segoe UI", 9f);
         ClientSize = new Size(760, 620);
         MinimumSize = new Size(680, 540);
@@ -44,7 +62,7 @@ public sealed class PrintConfirmDialog : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(8),
         };
-        var preview = new PreviewBox
+        _preview = new PreviewBox
         {
             Dock = DockStyle.Fill,
             Image = cardImage,
@@ -52,7 +70,47 @@ public sealed class PrintConfirmDialog : Form
             // The printer receives the full image, bleed included; the dashed line marks the trim.
             ShowBleed = true,
         };
-        previewGroup.Controls.Add(preview);
+        previewGroup.Controls.Add(_preview);
+
+        // ◀ i/N ▶ to look through the queued cards, bottom left under the preview (as in the main window).
+        if (isQueue)
+        {
+            Button NavButton(string text, int delta)
+            {
+                var b = new Button
+                {
+                    Text = text,
+                    Size = new Size(24, 22),
+                    Margin = new Padding(0, 1, 2, 1),
+                    Padding = new Padding(0),
+                    Font = new Font("Segoe UI Symbol", 8f),
+                    FlatStyle = FlatStyle.System,
+                    TabStop = false,
+                };
+                b.Click += (_, _) => Step(delta);
+                return b;
+            }
+            _counter = new Label { AutoSize = true, Margin = new Padding(2, 5, 4, 0) };
+            var nav = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Bottom,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                WrapContents = false,
+                Padding = new Padding(0, 4, 0, 0),
+            };
+            nav.Controls.AddRange(new Control[] { NavButton("◀", -1), _counter, NavButton("▶", +1) });
+            previewGroup.Controls.Add(nav);
+            KeyPreview = true;
+            KeyDown += (_, e) =>
+            {
+                if (e.KeyCode is Keys.Left or Keys.Right && !e.Control && !e.Alt)
+                {
+                    Step(e.KeyCode == Keys.Left ? -1 : +1);
+                    e.Handled = true;
+                }
+            };
+        }
         mainLayout.Controls.Add(previewGroup, 0, 0);
 
         // Right: Job Details
@@ -64,15 +122,16 @@ public sealed class PrintConfirmDialog : Form
         };
         var detailsLayout = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.Top,
             ColumnCount = 2,
-            RowCount = 7,
+            RowCount = isQueue ? 8 : 7,
             AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
         };
         detailsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
         detailsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        void AddRow(string label, string val, bool bold = false)
+        Label AddRow(string label, string val, bool bold = false)
         {
             var lbl = new Label
             {
@@ -92,11 +151,13 @@ public sealed class PrintConfirmDialog : Form
             };
             detailsLayout.Controls.Add(lbl);
             detailsLayout.Controls.Add(valLbl);
+            return valLbl;
         }
 
-        AddRow("Card:", card.Name, bold: true);
-        AddRow("Source:", Path.GetFileName(card.Pack.Name));
-        AddRow("Resolution:", $"{cardImage.Width} x {cardImage.Height} px");
+        if (isQueue) AddRow("Print queue:", $"{queueCount} cards, printed in browser order", bold: true);
+        _cardValue = AddRow(isQueue ? "Previewing:" : "Card:", card.Name, bold: !isQueue);
+        _sourceValue = AddRow("Source:", Path.GetFileName(card.Pack.Name));
+        _resolutionValue = AddRow("Resolution:", $"{cardImage.Width} x {cardImage.Height} px");
         AddRow("Print Finish:", overcoatName, bold: true);
         AddRow("Density:", overcoatIndex == 0 ? $"{density:+#;-#;0}" : "(Locked by overcoat)");
         AddRow("Pre-Heat Head:", preheat ? "Enabled" : "Disabled");
@@ -129,7 +190,7 @@ public sealed class PrintConfirmDialog : Form
             Font = new Font("Segoe UI", 10f, primary ? FontStyle.Bold : FontStyle.Regular),
         };
 
-        var continueBtn = DialogButton("Continue", DialogResult.OK, primary: true);
+        var continueBtn = DialogButton(isQueue ? $"Print {queueCount} Cards" : "Continue", DialogResult.OK, primary: true);
         continueBtn.Margin = new Padding(0);
         var cancelBtn = DialogButton("Cancel", DialogResult.Cancel, primary: false);
         cancelBtn.Margin = new Padding(0, 0, 10, 0);
@@ -144,5 +205,63 @@ public sealed class PrintConfirmDialog : Form
         CancelButton = cancelBtn;
 
         Controls.Add(mainLayout);
+        UpdateCounter();
+    }
+
+    private int IndexOf(CardItem card)
+    {
+        for (int i = 0; i < _queue.Count; i++)
+            if (_queue[i] == card) return i;
+        return -1;
+    }
+
+    private void UpdateCounter()
+    {
+        if (_counter != null) _counter.Text = $"{_index + 1}/{_queue.Count}";
+    }
+
+    /// <summary>Shows the previous / next queued card (wrapping around), rendering it the first time.</summary>
+    private async void Step(int delta)
+    {
+        _index = ((_index + delta) % _queue.Count + _queue.Count) % _queue.Count;
+        var card = _queue[_index];
+        int version = ++_loadVersion;
+        UpdateCounter();
+        _cardValue.Text = card.Name;
+        _sourceValue.Text = Path.GetFileName(card.Pack.Name);
+
+        Image? image = card == _initialCard ? _initialImage : _rendered.GetValueOrDefault(card);
+        if (image == null)
+        {
+            _preview.Image = null;
+            _preview.Placeholder = "Loading...";
+            _resolutionValue.Text = "...";
+            try
+            {
+                var bmp = await Task.Run(card.LoadFull);
+                if (IsDisposed) { bmp.Dispose(); return; }
+                // Keep it even if the user has moved on, so going back is instant.
+                if (!_rendered.TryAdd(card, bmp)) bmp.Dispose();
+                image = _rendered[card];
+            }
+            catch (Exception ex)
+            {
+                if (version != _loadVersion || IsDisposed) return;
+                _preview.Placeholder = "Preview\nnot\navailable";
+                _resolutionValue.Text = $"Failed to load: {ex.Message}";
+                return;
+            }
+            if (version != _loadVersion) return;
+        }
+        _preview.Image = image;
+        _resolutionValue.Text = $"{image.Width} x {image.Height} px";
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        _preview.Image = null;
+        foreach (var bmp in _rendered.Values) bmp.Dispose();
+        _rendered.Clear();
+        base.OnFormClosed(e);
     }
 }

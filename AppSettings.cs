@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace CPT50DTools;
 
@@ -6,13 +7,19 @@ namespace CPT50DTools;
 public sealed class AppSettings
 {
     public string? LastCardFolder { get; set; }
-    public string? LutOverlayFolder { get; set; }
+    /// <summary>
+    /// The game's ext\cpusbxpkm_data folder (LUTs, compensation tables, KMAT overlays), found when a
+    /// game folder is loaded. Stored under its old name so existing settings files keep it.
+    /// </summary>
+    [JsonPropertyName("LutOverlayFolder")]
+    public string? PrinterDataFolder { get; set; }
     public string? PrinterSdkFolder { get; set; }
 
     public int Overcoat { get; set; }
     public int Density { get; set; }
-    public int FitMode { get; set; }
     public bool Preheat { get; set; }
+    /// <summary>Pixels the card is moved down on the print to match where this printer cuts it.</summary>
+    public int PrintOffsetY { get; set; } = 14;
     /// <summary>Show the print bleed around the card face in the preview.</summary>
     public bool ShowBleed { get; set; }
     /// <summary>Leave the "©year Konami Amusement" line off the card.</summary>

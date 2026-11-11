@@ -327,15 +327,6 @@ public static class CardLibrary
         }
     }
 
-    /// <summary>
-    /// Composites high-resolution character artwork from the *_b.ifs archive with authentic
-    /// native vector-grade card frames, title/artist plaques, and crest logos.
-    /// </summary>
-    public static Bitmap CompositeCard(Bitmap big, Bitmap? small, string cardName = "")
-    {
-        return CardCompositor.Compose(big, cardName, small);
-    }
-
     /// <summary>Decodes the largest image of an archive, searching nested archives if needed.</summary>
     private static Bitmap DecodeBest(IfsArchive a)
     {
