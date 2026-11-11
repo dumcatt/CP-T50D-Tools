@@ -79,14 +79,41 @@ public static class CardLibrary
     /// </summary>
     public static string ResolveCardFolder(string folder)
     {
-        string[] candidates =
-        {
-            Path.Combine(folder, "contents", "data", "graphics", "chara_card"),
-            Path.Combine(folder, "data", "graphics", "chara_card"),
-            Path.Combine(folder, "graphics", "chara_card"),
-            Path.Combine(folder, "chara_card"),
-        };
-        return candidates.FirstOrDefault(Directory.Exists) ?? folder;
+        string? data = ResolveDataFolder(folder);
+        if (data != null) return Path.Combine(data, "graphics", "chara_card");
+        string nested = Path.Combine(folder, "chara_card");
+        return Directory.Exists(nested) ? nested : folder;
+    }
+
+    private static bool IsDataFolder(string dir) =>
+        Directory.Exists(Path.Combine(dir, "graphics", "chara_card"));
+
+    /// <summary>
+    /// Finds the game's "data" folder (the one holding graphics\chara_card and others\genesis_card.xml)
+    /// from a game root, "contents", "data" folder, or any folder inside "data" (e.g. chara_card).
+    /// Returns null if none is found.
+    /// </summary>
+    public static string? ResolveDataFolder(string path)
+    {
+        string? dir = Directory.Exists(path) ? path : Path.GetDirectoryName(path);
+        if (string.IsNullOrEmpty(dir)) return null;
+        dir = Path.GetFullPath(dir);
+
+        // Look down from the chosen folder.
+        foreach (var c in new[] { dir, Path.Combine(dir, "data"), Path.Combine(dir, "contents", "data") })
+            if (IsDataFolder(c)) return c;
+
+        // Look up from inside the data folder (e.g. data\graphics\chara_card).
+        for (var d = Directory.GetParent(dir); d != null; d = d.Parent)
+            if (IsDataFolder(d.FullName)) return d.FullName;
+        return null;
+    }
+
+    /// <summary>Path of genesis_card.xml for a data folder, or null if it does not exist.</summary>
+    public static string? CatalogPath(string dataFolder)
+    {
+        string p = Path.Combine(dataFolder, "others", "genesis_card.xml");
+        return File.Exists(p) ? p : null;
     }
 
     /// <summary>Strips ".ifs" and a trailing "_b"/"_s" size suffix.</summary>

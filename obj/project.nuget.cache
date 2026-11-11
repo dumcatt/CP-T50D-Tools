@@ -1,13 +1,13 @@
 {
   "version": 2,
-  "dgSpecHash": "MeDA22Hr3mI=",
+  "dgSpecHash": "p+LAtmv0PQU=",
   "success": true,
-  "projectFilePath": "C:\\Users\\papha\\Documents\\CP-T50D\\CPT50DTools\\CPT50DTools.csproj",
+  "projectFilePath": "C:\\Users\\papha\\Documents\\CP-T50D-Tools\\CPT50DTools.csproj",
   "expectedPackageFiles": [
-    "C:\\Users\\papha\\.nuget\\packages\\microsoft.netcore.app.ref\\8.0.31\\microsoft.netcore.app.ref.8.0.31.nupkg.sha512",
-    "C:\\Users\\papha\\.nuget\\packages\\microsoft.windowsdesktop.app.ref\\8.0.31\\microsoft.windowsdesktop.app.ref.8.0.31.nupkg.sha512",
-    "C:\\Users\\papha\\.nuget\\packages\\microsoft.aspnetcore.app.ref\\8.0.31\\microsoft.aspnetcore.app.ref.8.0.31.nupkg.sha512",
-    "C:\\Users\\papha\\.nuget\\packages\\microsoft.netcore.app.host.win-x64\\8.0.31\\microsoft.netcore.app.host.win-x64.8.0.31.nupkg.sha512"
+    "C:\\Users\\papha\\.nuget\\packages\\microsoft.netcore.app.ref\\8.0.29\\microsoft.netcore.app.ref.8.0.29.nupkg.sha512",
+    "C:\\Users\\papha\\.nuget\\packages\\microsoft.windowsdesktop.app.ref\\8.0.29\\microsoft.windowsdesktop.app.ref.8.0.29.nupkg.sha512",
+    "C:\\Users\\papha\\.nuget\\packages\\microsoft.aspnetcore.app.ref\\8.0.29\\microsoft.aspnetcore.app.ref.8.0.29.nupkg.sha512",
+    "C:\\Users\\papha\\.nuget\\packages\\microsoft.netcore.app.host.win-x64\\8.0.29\\microsoft.netcore.app.host.win-x64.8.0.29.nupkg.sha512"
   ],
   "logs": []
 }

@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("CPT50DTools")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("0.1.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.1.0+dd9e50a5ba1996dc1cddec92eb37743ca9f425b3")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.1.0+4ca477b6904aa6f660b7f0002ae5cf842fc973c6")]
 [assembly: System.Reflection.AssemblyProductAttribute("CPT50DTools")]
 [assembly: System.Reflection.AssemblyTitleAttribute("CPT50DTools")]
 [assembly: System.Reflection.AssemblyVersionAttribute("0.1.0.0")]

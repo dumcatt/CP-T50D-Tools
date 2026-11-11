@@ -49,6 +49,8 @@ public sealed class PrintConfirmDialog : Form
             Dock = DockStyle.Fill,
             Image = cardImage,
             OvercoatIndex = overcoatIndex,
+            // The printer receives the full image, bleed included; the dashed line marks the trim.
+            ShowBleed = true,
         };
         previewGroup.Controls.Add(preview);
         mainLayout.Controls.Add(previewGroup, 0, 0);

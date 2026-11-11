@@ -13,6 +13,7 @@ public sealed class PreviewBox : Control
     private Image? _image;
     private string _placeholder = "Preview\nnot\navailable";
     private int _overcoatIndex;
+    private bool _showBleed = true;
 
     public PreviewBox()
     {
@@ -39,6 +40,16 @@ public sealed class PreviewBox : Control
         set { _overcoatIndex = value; Invalidate(); }
     }
 
+    /// <summary>
+    /// True: show the whole print area with the bleed shaded and the trim line marked.
+    /// False: show only the card face (what is left after trimming).
+    /// </summary>
+    public bool ShowBleed
+    {
+        get => _showBleed;
+        set { _showBleed = value; Invalidate(); }
+    }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
@@ -62,16 +73,34 @@ public sealed class PreviewBox : Control
         var available = Rectangle.Inflate(ClientRectangle, -margin, -margin);
         if (available.Width <= 0 || available.Height <= 0) return;
 
-        double s = Math.Min((double)available.Width / _image.Width, (double)available.Height / _image.Height);
-        int w = Math.Max(1, (int)Math.Round(_image.Width * s));
-        int h = Math.Max(1, (int)Math.Round(_image.Height * s));
+        var trim = CardCompositor.TrimRectFor(_image.Size);
+        var src = _showBleed ? new RectangleF(0, 0, _image.Width, _image.Height) : trim;
+
+        double s = Math.Min(available.Width / (double)src.Width, available.Height / (double)src.Height);
+        int w = Math.Max(1, (int)Math.Round(src.Width * s));
+        int h = Math.Max(1, (int)Math.Round(src.Height * s));
         var dst = new Rectangle(available.X + (available.Width - w) / 2, available.Y + (available.Height - h) / 2, w, h);
 
         g.InterpolationMode = InterpolationMode.HighQualityBicubic;
         g.PixelOffsetMode = PixelOffsetMode.HighQuality;
 
-        // Draw card image directly
-        g.DrawImage(_image, dst);
+        g.DrawImage(_image, dst, src, GraphicsUnit.Pixel);
+
+        if (_showBleed)
+        {
+            // Shade the bleed and mark the trim line.
+            var trimDst = new RectangleF(
+                dst.X + (float)(trim.X * s), dst.Y + (float)(trim.Y * s),
+                (float)(trim.Width * s), (float)(trim.Height * s));
+            using (var region = new Region(dst))
+            {
+                region.Exclude(trimDst);
+                using var shade = new SolidBrush(Color.FromArgb(110, 0, 0, 0));
+                g.FillRegion(shade, region);
+            }
+            using var trimPen = new Pen(Color.FromArgb(230, 0, 200, 255), 1f) { DashStyle = DashStyle.Dash };
+            g.DrawRectangle(trimPen, trimDst.X, trimDst.Y, trimDst.Width, trimDst.Height);
+        }
 
         // Subtle 1px border around the card edge (matching thumbnail border)
         using (var p = new Pen(Color.FromArgb(120, 120, 120)))

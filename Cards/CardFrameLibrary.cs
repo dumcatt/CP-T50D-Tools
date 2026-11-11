@@ -1,113 +1,107 @@
-using System.Drawing.Imaging;
 using System.Reflection;
+using CPT50DTools.Ifs;
 
 namespace CPT50DTools.Cards;
 
 /// <summary>
-/// Manages high-resolution, vector-grade card frame overlays, banners, crests, and copyright logos.
-/// Loads directly from embedded resources or the local Resources\Frames directory.
+/// Supplies the card frame, plaque, "ILLUST" tag and copyright textures.
+/// Textures are read from the game's own graphics\verNN\card_data.ifs (each game version has its
+/// own plaque artwork and logo), falling back to the bundled Resources\Frames copies (v3).
 /// </summary>
-public sealed class CardFrameLibrary : IDisposable
+public sealed class CardFrameLibrary
 {
     private static readonly Lazy<CardFrameLibrary> _lazy = new(() => new CardFrameLibrary());
     public static CardFrameLibrary Instance => _lazy.Value;
 
-    private readonly Dictionary<string, Bitmap> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Bitmap?> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<int, IfsArchive?> _archives = new();
     private readonly Assembly _asm = typeof(CardFrameLibrary).Assembly;
+    private readonly object _lock = new();
+    private string? _dataFolder;
 
-    public Bitmap? GetFrame(FrameStyle style) => style switch
+    /// <summary>Sets the game "data" folder textures are read from (null = bundled textures only).</summary>
+    public void SetDataFolder(string? dataFolder)
     {
-        FrameStyle.None => null,
-        FrameStyle.Gold => LoadTexture("frame_gold"),
-        FrameStyle.Silver => LoadTexture("frame_sil"),
-        FrameStyle.Legend => LoadTexture("frame_lg01"),
-        FrameStyle.Touhou => LoadTexture("frame_toho01"),
-        FrameStyle.White => LoadTexture("frame_white2"),
-        FrameStyle.Museca => LoadTexture("frame_museca"),
-        _ => LoadTexture("frame_gold")
-    };
-
-    public Bitmap? GetPlaque(PlaqueStyle style) => style switch
-    {
-        PlaqueStyle.Gold => LoadTexture("frame_gold_name"),
-        PlaqueStyle.Silver => LoadTexture("frame_sil_name"),
-        PlaqueStyle.Touhou => LoadTexture("frame_toho_name"),
-        _ => LoadTexture("frame_gold_name")
-    };
-
-    public Bitmap? GetPlaque(FrameStyle style) => style switch
-    {
-        FrameStyle.None => null,
-        FrameStyle.Gold or FrameStyle.Legend => LoadTexture("frame_gold_name"),
-        FrameStyle.Silver or FrameStyle.White => LoadTexture("frame_sil_name"),
-        FrameStyle.Touhou => LoadTexture("frame_toho_name"),
-        _ => LoadTexture("frame_gold_name")
-    };
-
-    public Bitmap? GetMidashi(int version) => version switch
-    {
-        3 => LoadTexture("illust_midashi_v3") ?? LoadTexture("illust_midashi"),
-        4 => LoadTexture("illust_midashi_v4") ?? LoadTexture("illust_midashi"),
-        5 => LoadTexture("illust_midashi_v5") ?? LoadTexture("illust_midashi"),
-        _ => LoadTexture("illust_midashi_v3") ?? LoadTexture("illust_midashi")
-    };
-
-    public Bitmap? GetWhiteMatte() => LoadTexture("frame_white2");
-
-    public Bitmap? GetCopyright(int copyrightId) => copyrightId switch
-    {
-        1 => LoadTexture("c_konami_de"),
-        2 => LoadTexture("c_toho"),
-        3 => LoadTexture("c_internet"),
-        4 => LoadTexture("c_exit"),
-        5 => LoadTexture("c_mixi"),
-        _ => LoadTexture("c_konami_de")
-    };
-
-    private Bitmap? LoadTexture(string name)
-    {
-        lock (_cache)
+        lock (_lock)
         {
-            if (_cache.TryGetValue(name, out var cached)) return cached;
+            if (string.Equals(_dataFolder, dataFolder, StringComparison.OrdinalIgnoreCase)) return;
+            _dataFolder = dataFolder;
+            foreach (var b in _cache.Values) b?.Dispose();
+            _cache.Clear();
+            _archives.Clear();
+        }
+    }
 
-            // 1. Try file from output directory
-            string filePath = Path.Combine(AppContext.BaseDirectory, "Resources", "Frames", name + ".png");
+    /// <summary>
+    /// Returns a texture for the given game version. Bitmaps are shared and cached: callers must
+    /// not dispose them, and must only draw them while holding <see cref="SyncRoot"/>.
+    /// </summary>
+    public Bitmap? Get(int version, string name)
+    {
+        lock (_lock)
+        {
+            string key = $"{version}/{name}";
+            if (_cache.TryGetValue(key, out var cached)) return cached;
+            var bmp = LoadFromGame(version, name) ?? LoadBundled(name);
+            _cache[key] = bmp;
+            return bmp;
+        }
+    }
+
+    /// <summary>GDI+ bitmaps are not thread safe; hold this while drawing textures from this library.</summary>
+    public object SyncRoot => _lock;
+
+    private Bitmap? LoadFromGame(int version, string name)
+    {
+        if (_dataFolder == null) return null;
+        // Prefer the card's own version, then older versions, then newer ones.
+        var versions = Enumerable.Range(1, version).Reverse().Concat(Enumerable.Range(version + 1, 10));
+        foreach (int v in versions)
+        {
+            var archive = OpenArchive(v);
+            var img = archive?.Images.FirstOrDefault(i => string.Equals(i.Name, name, StringComparison.OrdinalIgnoreCase));
+            if (img == null) continue;
+            try { return archive!.DecodeImage(img); } catch { }
+        }
+        return null;
+    }
+
+    private IfsArchive? OpenArchive(int version)
+    {
+        if (_archives.TryGetValue(version, out var a)) return a;
+        string path = Path.Combine(_dataFolder!, "graphics", $"ver{version:D2}", "card_data.ifs");
+        try { a = File.Exists(path) ? IfsArchive.Open(path) : null; } catch { a = null; }
+        _archives[version] = a;
+        return a;
+    }
+
+    private Bitmap? LoadBundled(string name)
+    {
+        string filePath = Path.Combine(AppContext.BaseDirectory, "Resources", "Frames", name + ".png");
+        try
+        {
             if (File.Exists(filePath))
             {
-                try
-                {
-                    var bmp = (Bitmap)Image.FromFile(filePath);
-                    _cache[name] = bmp;
-                    return bmp;
-                }
-                catch { }
+                using var img = Image.FromFile(filePath);
+                return new Bitmap(img);
             }
-
-            // 2. Try embedded resource
-            string resName = $"CPT50DTools.Resources.Frames.{name}.png";
-            using var stream = _asm.GetManifestResourceStream(resName);
+            using var stream = _asm.GetManifestResourceStream($"CPT50DTools.Resources.Frames.{name}.png");
             if (stream != null)
             {
-                try
-                {
-                    using var img = Image.FromStream(stream);
-                    var bmp = new Bitmap(img);
-                    _cache[name] = bmp;
-                    return bmp;
-                }
-                catch { }
+                using var img = Image.FromStream(stream);
+                return new Bitmap(img);
             }
-
-            return null;
         }
+        catch { }
+        return null;
     }
 
-    public void Dispose()
+    public static string? CopyrightTexture(int copyrightId) => copyrightId switch
     {
-        lock (_cache)
-        {
-            foreach (var b in _cache.Values) b.Dispose();
-            _cache.Clear();
-        }
-    }
+        2 => "c_toho",
+        3 => "c_internet",
+        4 => "c_exit",
+        5 => "c_mixi",
+        _ => "c_konami_de",
+    };
 }
